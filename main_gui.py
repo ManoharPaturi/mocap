@@ -467,9 +467,7 @@ class MocapGUI:
             
             # --- DRAW VISUALIZATION FIRST (for network transmission) ---
             if DRAW_LANDMARKS and results:
-                if 'pose' in results and results['pose']:
-                    frame = self.visualizer.draw(frame, results['pose'], results.get('face'), 
-                                                 results.get('left_hand'), results.get('right_hand'))
+                frame = self.visualizer.draw_landmarks(frame, results)
             # -----------------------------------------------------------
             
             # --- NETWORK BROADCASTING (Server Mode) - ASYNC ---
