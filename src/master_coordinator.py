@@ -268,8 +268,9 @@ class MasterCoordinator:
         if self.stats['frames_received'].get(camera_id, 0) < 5:
             print(f"[_process_frame_data] cam={camera_id}, frame={frame_number}, ts={timestamp}, results={'yes' if results else 'NO'}")
         
-        if not all([camera_id, frame_number is not None, timestamp, results]):
-            print(f"[_process_frame_data] SKIPPING: cam={camera_id}, frame={frame_number}, ts={timestamp}, results={'yes' if results else 'NO'}")
+        # Allow empty results dict (no detection) - still valid for sync
+        if not all([camera_id, frame_number is not None, timestamp, results is not None]):
+            print(f"[_process_frame_data] SKIPPING: cam={camera_id}, frame={frame_number}, ts={timestamp}, results={'yes' if results is not None else 'NONE'}")
             return
         
         # Create FrameData object
