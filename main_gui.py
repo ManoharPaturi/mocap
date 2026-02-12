@@ -543,67 +543,63 @@ class MocapGUI:
             
             # --- DUAL CAMERA DISPLAY (Master Mode) ---
             if MULTI_CAMERA_MODE == 'master' and self.coordinator:
-                # Resize local frame
                 display_width, display_height = 640, 480
+                
+                # ALWAYS DISPLAY: Grab freshest frames from buffers
                 local_frame_display = cv2.resize(frame, (display_width, display_height))
-                
-                # Get most recent remote frame (don't wait for perfect sync)
                 remote_frame = None
-                sync_status = "WAITING"
+                sync_label = "WAITING"
                 
-                # Check if we have any remote frames in buffer
-                if 'cam_0' in self.coordinator.frame_buffers and len(self.coordinator.frame_buffers['cam_0']) > 0:
-                    # Get the most recent frame (last in buffer)
-                    latest_remote = self.coordinator.frame_buffers['cam_0'][-1]
-                    
-                    if 'frame_jpeg' in latest_remote.results and latest_remote.results['frame_jpeg']:
-                        try:
-                            jpg_bytes = latest_remote.results['frame_jpeg']
-                            jpg_np = np.frombuffer(jpg_bytes, dtype=np.uint8)
-                            decoded_frame = cv2.imdecode(jpg_np, cv2.IMREAD_COLOR)
-                            if decoded_frame is not None:
-                                remote_frame = cv2.resize(decoded_frame, (display_width, display_height))
-                                self.remote_frame = remote_frame  # Cache
-                                sync_status = "LIVE"
-                        except Exception as e:
-                            if self.frame_count <= 3:
-                                print(f"[ERROR] Decode failed: {e}")
+                # Get newest remote frame if available (buffer[-1] = most recent)
+                if 'cam_0' in self.coordinator.frame_buffers:
+                    buf = self.coordinator.frame_buffers['cam_0']
+                    if len(buf) > 0:
+                        latest = buf[-1]  # Freshest frame, period.
+                        
+                        # Decode JPEG
+                        if 'frame_jpeg' in latest.results and latest.results['frame_jpeg']:
+                            try:
+                                jpg_np = np.frombuffer(latest.results['frame_jpeg'], dtype=np.uint8)
+                                decoded = cv2.imdecode(jpg_np, cv2.IMREAD_COLOR)
+                                if decoded is not None:
+                                    remote_frame = cv2.resize(decoded, (display_width, display_height))
+                                    self.remote_frame = remote_frame  # Cache
+                                    sync_label = "LIVE"
+                            except:
+                                pass
                 
-                # Check if synced (just for status label)
-                synced_batch = self.coordinator.get_synchronized_batch()
-                if synced_batch and len(synced_batch) >= 2:
-                    sync_status = "SYNCED"
+                # Check sync status (just for label color, doesn't block display)
+                synced = self.coordinator.get_synchronized_batch()
+                if synced and len(synced) >= 2:
+                    sync_label = "SYNCED ✓"
                 
-                # Use cached frame if no new frame
+                # Fallback to cached if no new frame decoded
                 if remote_frame is None and self.remote_frame is not None:
                     remote_frame = self.remote_frame
-                    sync_status = "CACHED"
-                
-                # Fallback to black if still nothing
-                if remote_frame is None:
+                    sync_label = "CACHED"
+                elif remote_frame is None:
+                    # No data at all yet
                     remote_frame = np.zeros((display_height, display_width, 3), dtype=np.uint8)
-                    sync_status = "NO DATA"
+                    sync_label = "NO DATA"
                 
-                # Add status labels with color based on sync
-                label_colors = {
-                    "SYNCED": (0, 255, 0),     # Green
-                    "LIVE": (0, 255, 255),     # Yellow
-                    "CACHED": (0, 165, 255),   # Orange
-                    "WAITING": (255, 255, 0),  # Cyan
-                    "NO DATA": (0, 0, 255)     # Red
+                # Labels with color coding
+                colors = {
+                    "SYNCED ✓": (0, 255, 0),
+                    "LIVE": (0, 255, 255), 
+                    "CACHED": (0, 165, 255),
+                    "WAITING": (255, 255, 0),
+                    "NO DATA": (0, 0, 255)
                 }
                 
-                cv2.putText(local_frame_display, "Local Camera (PC1)", (10, 30),
+                cv2.putText(local_frame_display, "Local (PC1)", (10, 30),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                cv2.putText(remote_frame, f"Remote (PC2) - {sync_status}", (10, 30),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, label_colors[sync_status], 2)
+                cv2.putText(remote_frame, f"Remote (PC2) {sync_label}", (10, 30),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, colors[sync_label], 2)
                 
-                # Combine side-by-side
-                combined_frame = np.hstack([local_frame_display, remote_frame])
-                
-                # Display
+                # Display side-by-side - ALWAYS, every frame
+                combined = np.hstack([local_frame_display, remote_frame])
                 if platform.system() != 'Darwin':
-                    cv2.imshow("Dual Camera View - Master", combined_frame)
+                    cv2.imshow("Dual Camera View - Master", combined)
             else:
                 # Single camera mode or server mode
                 # Mac: Skip OpenCV window (GUI dashboard works fine)
