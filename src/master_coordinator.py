@@ -230,12 +230,19 @@ class MasterCoordinator:
     
     def _data_receiver(self):
         """Receive frame data from all connected cameras."""
+        print("[MasterCoordinator] _data_receiver thread STARTED")
+        msg_count = 0
+        
         while self.running and not self.stop_event.is_set():
             try:
                 # Poll all data sockets
                 for camera_id, socket in list(self.data_sockets.items()):
                     if socket.poll(timeout=10):
                         data = socket.recv()
+                        msg_count += 1
+                        
+                        if msg_count <= 10:
+                            print(f"[MasterCoordinator] Received message #{msg_count} from {camera_id}")
                         
                         # Deserialize
                         if COMPRESS_NETWORK_DATA:
