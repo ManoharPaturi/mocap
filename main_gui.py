@@ -52,7 +52,8 @@ class MocapGUI:
                 self.coordinator = MasterCoordinator(num_cameras=2)
                 self.coordinator.start()
                 self.coordinator.discover_cameras_manual([REMOTE_CAMERA_IP])
-                self.triangulator = Triangulator()
+                # Triangulator with no calibration for now (will load when available)
+                self.triangulator = Triangulator(calibration=None)
                 print(f"[GUI] Master Coordinator started - connecting to {REMOTE_CAMERA_IP}")
         
         # State
