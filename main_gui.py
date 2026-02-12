@@ -3,6 +3,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import threading
 import time
+import numpy as np
 from src.camera import Camera
 from src.detector import MocapDetector
 from src.visualizer import Visualizer
@@ -11,7 +12,14 @@ from src.visualizer_3d import Visualizer3D
 from src.report_generator import ReportGenerator
 from src.pose_corrector import PoseCorrector
 from src.calculations import Calculations
-from config import DRAW_LANDMARKS
+from config import DRAW_LANDMARKS, MULTI_CAMERA_MODE, REMOTE_CAMERA_IP
+
+# Multi-camera imports (conditional)
+if MULTI_CAMERA_MODE == 'server':
+    from src.camera_server import CameraServer
+elif MULTI_CAMERA_MODE == 'master':
+    from src.master_coordinator import MasterCoordinator
+    from src.triangulation import Triangulator
 
 class MocapGUI:
     def __init__(self):
@@ -23,6 +31,28 @@ class MocapGUI:
         self.viz_3d = Visualizer3D(self.db) 
         self.reporter = ReportGenerator(self.db) 
         self.corrector = PoseCorrector() # Init Physics Engine
+        
+        # Multi-camera network components
+        self.network_server = None
+        self.coordinator = None
+        self.triangulator = None
+        self.remote_frame = None  # Buffer for remote camera frame
+        
+        # Initialize network based on mode
+        if MULTI_CAMERA_MODE == 'server':
+            self.network_server = CameraServer('cam_0')
+            self.network_server.start()
+            print("[GUI] Camera Server started - broadcasting to network")
+            
+        elif MULTI_CAMERA_MODE == 'master':
+            if not REMOTE_CAMERA_IP:
+                print("[GUI] WARNING: REMOTE_CAMERA_IP not set in config!")
+            else:
+                self.coordinator = MasterCoordinator(num_cameras=2)
+                self.coordinator.start()
+                self.coordinator.discover_cameras_manual([REMOTE_CAMERA_IP])
+                self.triangulator = Triangulator()
+                print(f"[GUI] Master Coordinator started - connecting to {REMOTE_CAMERA_IP}")
         
         # State
         self.running = True
@@ -37,7 +67,15 @@ class MocapGUI:
         
         # Create tkinter window
         self.root = tk.Tk()
-        self.root.title("MoCap Live Dashboard")
+        
+        # Set title based on mode
+        mode_name = {
+            'single': '',
+            'server': ' - Camera Server (PC1)', 
+            'master': ' - Master Coordinator (PC2)'
+        }.get(MULTI_CAMERA_MODE, '')
+        self.root.title(f"MoCap Live Dashboard{mode_name}")
+        
         self.root.geometry("500x700")
         self.root.configure(bg='#0f0f1e')  # VS2 Dark Theme
         self.db = MocapDB()
@@ -418,6 +456,27 @@ class MocapGUI:
                     self.root.after(0, self.update_metrics_gui, metrics)
                 except: pass
             # -------------------------
+            
+            # --- NETWORK BROADCASTING (Server Mode) ---
+            if self.network_server:
+                # Broadcast detection results to network
+                timestamp = time.perf_counter_ns()
+                self.network_server.send_frame_data(
+                    self.frame_count, timestamp, results
+                )
+            # -----------------------------------------
+            
+            # --- RECEIVE REMOTE CAMERA (Master Mode) ---
+            if self.coordinator:
+                # Get synchronized batch from both cameras
+                synced_batch = self.coordinator.get_synchronized_batch()
+                if synced_batch and len(synced_batch) >= 1:
+                    # Remote camera data available
+                    remote_data = synced_batch[0]
+                    # TODO: Decode frame from remote_data.results
+                    # For now, just mark that we have remote data
+                    pass
+            # -----------------------------------------
             
             if self.is_recording:
                 # Save first

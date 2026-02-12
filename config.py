@@ -151,11 +151,19 @@ CAMERA_ROLE = 'single'  # 'single', 'server', or 'master'
 CAMERA_ID = 'cam_0'     # Unique identifier for this camera
 NUM_CAMERAS = 2         # Total number of cameras in setup
 
+# --- GUI Integration Mode (NEW) ---
+# Set this based on which laptop you're using:
+# 'single' - Normal single-camera mode (default)
+# 'server' - Full GUI + broadcasts to network (PC1)
+# 'master' - Full GUI + receives from network + dual display (PC2)
+MULTI_CAMERA_MODE = 'single'
+REMOTE_CAMERA_IP = None  # IP of other laptop (e.g., '10.51.179.228')
+
 # Network Configuration
 MASTER_IP = '192.168.1.100'  # IP address of master coordinator
 DISCOVERY_PORT = 5000        # Port for camera discovery broadcasts
 DATA_PORT = 5001            # Port for frame data transmission
-NETWORK_PROTOCOL = 'udp'     # 'udp' (faster) or 'tcp' (reliable)
+NETWORK_PROTOCOL = 'tcp'     # 'udp' (faster) or 'tcp' (reliable)
 
 # Frame Synchronization
 SYNC_TIME_THRESHOLD_MS = 33.0  # Max time difference for frame matching (ms)
