@@ -530,15 +530,22 @@ class MocapGUI:
                     
                     # Combine side-by-side
                     combined_frame = np.hstack([frame, remote_frame])
-                    cv2.imshow("Dual Camera View - Master", combined_frame)
+                    
+                    # Mac: Skip OpenCV window (GUI works fine)
+                    if platform.system() != 'Darwin':
+                        cv2.imshow("Dual Camera View - Master", combined_frame)
                 else:
                     # No remote data yet, show local only
                     cv2.putText(frame, "Local Camera - Waiting for Remote...", (10, 30),
                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-                    cv2.imshow("Dual Camera View - Master", frame)
+                    
+                    if platform.system() != 'Darwin':
+                        cv2.imshow("Dual Camera View - Master", frame)
             else:
                 # Single camera mode or server mode
-                cv2.imshow("MoCap Live Feed", frame)
+                # Mac: Skip OpenCV window (GUI dashboard works fine)
+                if platform.system() != 'Darwin':
+                    cv2.imshow("MoCap Live Feed", frame)
             
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 self.running = False
