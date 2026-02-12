@@ -501,10 +501,10 @@ class MocapGUI:
                     if len(self.coordinator.frame_buffer['local_cam']) > 30:
                         self.coordinator.frame_buffer['local_cam'].pop(0)
                     
-                    # Debug: Print buffer status every 60 frames
-                    if self.frame_count % 60 == 0:
+                    # Debug: Print buffer status for first 10 frames AND every 60 frames
+                    if self.frame_count <= 10 or self.frame_count % 60 == 0:
                         buffer_sizes = {cam: len(buf) for cam, buf in self.coordinator.frame_buffer.items()}
-                        print(f"[DEBUG] Frame buffers: {buffer_sizes}")
+                        print(f"[DEBUG Frame {self.frame_count}] Buffers: {buffer_sizes}")
             # -----------------------------------------
             
             if self.is_recording:
