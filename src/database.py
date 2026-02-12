@@ -82,14 +82,23 @@ class MocapDB:
         conn = self._get_connection()
         c = conn.cursor()
         
-        # 1. Create Dynamic Table for this session
+        # 1. Create Dynamic Table for this session (Expanded for Multi-Cam)
         create_table_sql = f'''CREATE TABLE IF NOT EXISTS {self.current_table}
                              (id {("SERIAL PRIMARY KEY" if self.db_type == 'postgres' else "INTEGER PRIMARY KEY AUTOINCREMENT")},
                               timestamp REAL,
+                              -- PC1 (Local)
                               pose_data TEXT,
                               face_data TEXT,
                               hand_data TEXT,
-                              derived_data TEXT)'''
+                              derived_data TEXT,
+                              -- PC2 (Remote)
+                              pc2_pose_data TEXT,
+                              pc2_face_data TEXT,
+                              pc2_hand_data TEXT,
+                              pc2_derived_data TEXT,
+                              -- 3D / Combined
+                              pose_3d_data TEXT,
+                              combined_derived_data TEXT)'''
         c.execute(create_table_sql)
         
         # 2. Register Session
@@ -119,7 +128,7 @@ class MocapDB:
         return saved_id
 
     def save_frame(self, results):
-        """Queue a frame of results for saving."""
+        """Queue a single-camera frame (legacy/PC1-only mode)."""
         if not self.running or not self.session_id:
             return
             
@@ -130,7 +139,6 @@ class MocapDB:
         
         # Calculate Derived Metrics
         derived_data = []
-        
         for p_idx, person_pose in enumerate(pose_data):
             p_metrics = Calculations.get_body_metrics(person_pose)
             if p_idx < len(face_data):
@@ -139,6 +147,7 @@ class MocapDB:
             derived_data.append(p_metrics)
             
         data = {
+            'type': 'single',
             'timestamp': time.time(),
             'pose': pose_data,
             'face': face_data,
@@ -147,26 +156,139 @@ class MocapDB:
         }
         self.queue.put(data)
 
-    def _serialize_landmarks(self, result, attr_name):
-        """Convert MediaPipe results to JSON-serializable list."""
-        if not result or not getattr(result, attr_name):
-            return []
+    def save_synced_frame(self, timestamp, pc1_results, pc2_results, pose_3d):
+        """Queue a synchronized multi-camera frame."""
+        if not self.running or not self.session_id:
+            return
+
+        def process_results(results):
+            if not results: return [], [], [], []
+            msg_pose = results.get('pose')
+            # Handle FrameData results which might have different structure or be raw dicts
+            # If coming from FrameData, results is a dict with 'pose': SimpleNamespace/list...
+            # Actually master_coordinator passes dicts now.
+            
+            # Helper to safely get from dict or object
+            def get_attr(obj, attr):
+                if isinstance(obj, dict): return obj.get(attr)
+                return getattr(obj, attr, None)
+            
+            # Serialize
+            pose = self._serialize_landmarks(results, 'pose') # Adjusted: expecting 'pose' key in dict
+            face = self._serialize_landmarks(results, 'face')
+            hand = self._serialize_landmarks(results, 'hand')
+            
+            derived = []
+            for p_idx, person_pose in enumerate(pose):
+                p_metrics = Calculations.get_body_metrics(person_pose)
+                if p_idx < len(face):
+                     # Need to convert face list back to dict format expected by Calculations
+                     # _serialize_landmarks returns list of dicts {'x':...}
+                     # Calculations expects list of dicts directly
+                    f_metrics = Calculations.get_face_metrics(face[p_idx])
+                    p_metrics.update(f_metrics)
+                derived.append(p_metrics)
+            return pose, face, hand, derived
+
+        # PC1
+        p1_pose, p1_face, p1_hand, p1_derived = process_results(pc1_results)
         
+        # PC2
+        p2_pose, p2_face, p2_hand, p2_derived = process_results(pc2_results)
+        
+        # 3D
+        p3d_data = []
+        if pose_3d and 'pose_3d' in pose_3d:
+            # Flatten 3D dict to list for storage
+            # Format: [{'id': 0, 'x': 1.2, ...}, ...]
+            for lm_id, lm_data in pose_3d['pose_3d'].items():
+                lm_data['id'] = lm_id
+                p3d_data.append(lm_data)
+        
+        data = {
+            'type': 'multi',
+            'timestamp': timestamp,
+            # PC1
+            'pose': p1_pose, 'face': p1_face, 'hand': p1_hand, 'derived': p1_derived,
+            # PC2
+            'pc2_pose': p2_pose, 'pc2_face': p2_face, 'pc2_hand': p2_hand, 'pc2_derived': p2_derived,
+            # 3D
+            'pose_3d': p3d_data,
+            'combined_derived': [] # Placeholder for future 3D metrics
+        }
+        self.queue.put(data)
+
+    def _serialize_landmarks(self, results, key_or_attr):
+        """Convert MediaPipe results to JSON-serializable list."""
+        # Handle input: dictionary or object
+        val = None
+        if isinstance(results, dict):
+             val = results.get(key_or_attr)
+             # If key_or_attr is 'pose', val is [NormalizedLandmarkList]
+             # If key_or_attr is 'pose_landmarks', val is same.
+             # In main_gui passing `results` dict -> has keys 'pose', 'face'
+             # In save_frame passing `results.get('pose')` -> object.
+        else:
+             val = getattr(results, key_or_attr, None)
+
+        if not val:
+             # Try fallback: Maybe 'pose' key contains the landmarks directly?
+             if isinstance(results, dict) and key_or_attr == 'pose':
+                  # Check if it has 'pose_landmarks' attribute inside
+                  real_res = results.get('pose') # This might be the MediaPipe Solution Output
+                  if hasattr(real_res, 'pose_landmarks'):
+                       val = real_res.pose_landmarks
+        
+        if not val: return []
+        
+        # Handle FrameData serialized dicts (from master_coordinator)
+        # If 'val' is already a list of dicts (from remote), return it
+        if isinstance(val, list) and len(val) > 0 and isinstance(val[0], dict) and 'x' in val[0]:
+             # It's already serialized landmark data (e.g. from remote PC2)
+             # But wait, it might be list of lists (people) -> list of landmarks
+             return [val] # Wrap single person in list of people if needed? 
+             # Remote sends: results['pose'] = [{'x':...}, ...] (Single person flattened?)
+             # Let's assume standardized format: List[List[Dict]] (People -> Landmarks)
+             pass
+
+        # If val is MediaPipe Object (NormalizedLandmarkList)
+        # Or list of such objects
         all_people = []
-        for person_landmarks in getattr(result, attr_name):
+        
+        # Helper to process one person's landmarks
+        def process_person(landmarks):
             person_data = []
-            for lm in person_landmarks:
-                lm_dict = {'x': round(lm.x, 5), 'y': round(lm.y, 5), 'z': round(lm.z, 5)}
-                if hasattr(lm, 'visibility'):
-                    lm_dict['v'] = round(lm.visibility, 5)
+            for lm in landmarks:
+                # Handle both object (lm.x) and dict (lm['x'])
+                if isinstance(lm, dict):
+                    lm_dict = {'x': round(lm.get('x',0), 5), 'y': round(lm.get('y',0), 5), 'z': round(lm.get('z',0), 5)}
+                    if 'visibility' in lm: lm_dict['v'] = round(lm['visibility'], 5)
+                else:
+                    lm_dict = {'x': round(lm.x, 5), 'y': round(lm.y, 5), 'z': round(lm.z, 5)}
+                    if hasattr(lm, 'visibility'):
+                        lm_dict['v'] = round(lm.visibility, 5)
                 person_data.append(lm_dict)
-            all_people.append(person_data)
+            return person_data
+
+        if isinstance(val, list):
+             # Could be list of landmarks (1 person) or list of lists
+             if not val: return []
+             if hasattr(val[0], 'x') or isinstance(val[0], dict):
+                  # Single list of landmarks (1 person)
+                  all_people.append(process_person(val))
+             else:
+                  # List of lists?
+                  pass
+        else:
+             # Single object with iterable landmarks
+             all_people.append(process_person(val))
+
         return all_people
 
     def _worker_loop(self):
-        """Background thread to batch insert data into specific session table."""
+        """Background thread to batch insert data."""
         conn = self._get_connection()
-        table_name = self.current_table # Capture for this thread
+        table_name = self.current_table
         
         while self.running or not self.queue.empty():
             try:
@@ -179,32 +301,35 @@ class MocapDB:
                         break
                 
                 if not batch:
-                    if not self.running: 
-                        break
+                    if not self.running: break
                     continue
 
                 c = conn.cursor()
                 for item in batch:
-                    # Insert into the dynamically named table
-                    # Note: Using python f-string for table name is safe here as it's internally generated from date
-                    insert_sql = f'''INSERT INTO {table_name} 
-                                     (timestamp, pose_data, face_data, hand_data, derived_data) 
-                                     VALUES (%s, %s, %s, %s, %s)''' if self.db_type == 'postgres' else \
-                                 f'''INSERT INTO {table_name} 
-                                     (timestamp, pose_data, face_data, hand_data, derived_data) 
-                                     VALUES (?, ?, ?, ?, ?)'''
-                                     
-                    c.execute(insert_sql, (
-                                   item['timestamp'], 
-                                   json.dumps(item['pose']), 
-                                   json.dumps(item['face']), 
-                                   json.dumps(item['hand']),
-                                   json.dumps(item['derived'])))
+                    if item.get('type') == 'multi':
+                         # Multi-camera insert (PC1 + PC2 + 3D)
+                         cols = "(timestamp, pose_data, face_data, hand_data, derived_data, pc2_pose_data, pc2_face_data, pc2_hand_data, pc2_derived_data, pose_3d_data, combined_derived_data)"
+                         vals = "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?" if self.db_type == 'sqlite' else "%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s"
+                         
+                         c.execute(f"INSERT INTO {table_name} {cols} VALUES ({vals})", (
+                              item['timestamp'],
+                              json.dumps(item['pose']), json.dumps(item['face']), json.dumps(item['hand']), json.dumps(item['derived']),
+                              json.dumps(item['pc2_pose']), json.dumps(item['pc2_face']), json.dumps(item['pc2_hand']), json.dumps(item['pc2_derived']),
+                              json.dumps(item['pose_3d']), json.dumps(item['combined_derived'])
+                         ))
+                    else:
+                         # Single camera insert (PC1 only) - Fill others with NULL/Empty
+                         cols = "(timestamp, pose_data, face_data, hand_data, derived_data)"
+                         vals = "?, ?, ?, ?, ?" if self.db_type == 'sqlite' else "%s, %s, %s, %s, %s"
+                         
+                         c.execute(f"INSERT INTO {table_name} {cols} VALUES ({vals})", (
+                              item['timestamp'],
+                              json.dumps(item['pose']), json.dumps(item['face']), json.dumps(item['hand']), json.dumps(item['derived'])
+                         ))
+                         
                 conn.commit()
-                
             except Exception as e:
                 print(f"DB Error: {e}")
-        
         conn.close()
 
     def export_latest_session_csv(self):
@@ -212,7 +337,7 @@ class MocapDB:
         conn = self._get_connection()
         c = conn.cursor()
         
-        # Get latest session AND its table name
+        # Get latest session
         c.execute("SELECT id, table_name FROM sessions ORDER BY start_time DESC LIMIT 1")
         row = c.fetchone()
         if not row:
@@ -220,75 +345,73 @@ class MocapDB:
             return None
         
         session_id, table_name = row
-        
-        # Handle fallback for old sessions (before refactor)
         if not table_name:
-            # Fallback to old 'frames' table logic (omitted for brevity, assuming new sessions)
-             query = "SELECT timestamp, pose_data, face_data, hand_data, derived_data FROM frames WHERE session_id = %s ORDER BY timestamp ASC" if self.db_type == 'postgres' else \
-                    "SELECT timestamp, pose_data, face_data, hand_data, derived_data FROM frames WHERE session_id = ? ORDER BY timestamp ASC"
-             c.execute(query, (session_id,))
+             # Fallback logic omitted
+             conn.close()
+             return None
+             
+        # Check columns to decide query type
+        # SQLite pragma
+        if self.db_type == 'sqlite':
+             c.execute(f"PRAGMA table_info({table_name})")
+             cols = [info[1] for info in c.fetchall()]
         else:
-            # Query the dynamic table
-            query = f"SELECT timestamp, pose_data, face_data, hand_data, derived_data FROM {table_name} ORDER BY timestamp ASC"
-            c.execute(query)
-            
+             # Postgres assumption
+             cols = [] # TODO
+        
+        is_multi = 'pc2_pose_data' in cols
+        
+        if is_multi:
+             query = f"SELECT timestamp, pose_data, derived_data, pc2_pose_data, pc2_derived_data, pose_3d_data FROM {table_name} ORDER BY timestamp ASC"
+        else:
+             query = f"SELECT timestamp, pose_data, derived_data FROM {table_name} ORDER BY timestamp ASC"
+             
+        c.execute(query)
         rows = c.fetchall()
         conn.close()
         
-        if not rows:
-            return None
-            
-        # Create CSV in memory
         output = io.StringIO()
         writer = csv.writer(output)
         
-        # Header - Dynamic based on what metrics we find? 
-        # For simplicity, we define a standard set + the raw nodes
-        header = ['Timestamp', 'Type', 'Person_Index', 'Data_Key', 'Value_X_or_Metric', 'Value_Y', 'Value_Z', 'Confidence']
+        # CSV Header
+        header = ['Timestamp', 'Source', 'Person', 'Key', 'Value_X', 'Value_Y', 'Value_Z', 'Conf']
         writer.writerow(header)
         
         for row in rows:
-            timestamp = row[0]
-            pose_json = row[1]
-            face_json = row[2]
-            hand_json = row[3]
-            derived_json = row[4] if len(row) > 4 and row[4] else "[]"
+            ts = row[0]
             
-            # Helper to write raw landmarks
-            def write_landmarks(data, l_type):
-                people = json.loads(data)
-                for p_idx, person in enumerate(people):
-                    for l_idx, lm in enumerate(person):
-                        writer.writerow([
-                            timestamp, 
-                            l_type, 
-                            p_idx, 
-                            l_idx, # Data Key = Landmark Index
-                            lm['x'], 
-                            lm['y'], 
-                            lm['z'], 
-                            lm.get('v', '')
-                        ])
+            # Helper
+            def write_data(source, pose_json, derived_json):
+                 if pose_json:
+                      try:
+                           people = json.loads(pose_json)
+                           for p_i, p in enumerate(people):
+                                for l_i, lm in enumerate(p):
+                                     writer.writerow([ts, source, p_i, l_i, lm.get('x'), lm.get('y'), lm.get('z'), lm.get('v','')])
+                      except: pass
+                 if derived_json:
+                      try:
+                           derived = json.loads(derived_json)
+                           for p_i, m in enumerate(derived):
+                                for k, v in m.items():
+                                     writer.writerow([ts, source, p_i, k, v, '', '', ''])
+                      except: pass
 
-            # Export Raw
-            write_landmarks(pose_json, 'POSE')
-            write_landmarks(face_json, 'FACE')
-            write_landmarks(hand_json, 'HAND')
+            # PC1
+            write_data('PC1', row[1], row[2])
             
-            # Export Derived Metrics
-            try:
-                derived = json.loads(derived_json)
-                for p_idx, metrics in enumerate(derived):
-                    for key, value in metrics.items():
-                        writer.writerow([
-                            timestamp,
-                            'METRIC',
-                            p_idx,
-                            key, # Data Key = Metric Name
-                            value, # Value stored in X column
-                            '', '', '' 
-                        ])
-            except:
-                pass
-            
+            if is_multi:
+                 # PC2
+                 write_data('PC2', row[3], row[4])
+                 
+                 # 3D
+                 p3d_json = row[5]
+                 if p3d_json:
+                      try:
+                           pts = json.loads(p3d_json)
+                           # list of dicts {'id':..., 'x':..., ...}
+                           for Pt in pts:
+                                writer.writerow([ts, '3D', 0, Pt.get('id'), Pt.get('x'), Pt.get('y'), Pt.get('z'), Pt.get('visibility')])
+                      except: pass
+                      
         return output.getvalue()

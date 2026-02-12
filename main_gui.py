@@ -290,7 +290,7 @@ class MocapGUI:
                        activebackground='#0f0f1e', activeforeground='#e0e0e0',
                        command=self.update_imaging).grid(row=1, column=0, columnspan=2, sticky='w', padx=5)
         
-        self.roi_var = tk.BooleanVar(value=True)
+        self.roi_var = tk.BooleanVar(value=False)
         tk.Checkbutton(image_frame, text="ROI Cropping", variable=self.roi_var,
                        bg='#0f0f1e', fg='#e0e0e0', selectcolor='#0f0f1e',
                        activebackground='#0f0f1e', activeforeground='#e0e0e0',
@@ -466,7 +466,7 @@ class MocapGUI:
             # -------------------------
             
             # --- DRAW VISUALIZATION FIRST (for network transmission) ---
-            if DRAW_LANDMARKS and results:
+            if self.markers_var.get() and results:
                 frame = self.visualizer.draw_landmarks(frame, results)
             # -----------------------------------------------------------
             
@@ -519,8 +519,9 @@ class MocapGUI:
             # -----------------------------------------
             
             if self.is_recording:
-                # Save first
-                self.db.save_frame(results)
+                # Save first - BUT ONLY if not in master mode (master saves synced batches)
+                if MULTI_CAMERA_MODE != 'master':
+                    self.db.save_frame(results)
                 
                 # Update GUI safely (Throttled)
                 if self.frame_count % 5 == 0:
@@ -575,6 +576,18 @@ class MocapGUI:
                     
                     # Compute 3D Pose
                     pose_3d = self.coordinator.get_synced_3d_pose(synced_batch)
+                    
+                    # SAVE SYNCHRONIZED DATA (Master Mode Recording)
+                    if self.is_recording:
+                         # Extract results for PC1 (local) and PC2 (remote)
+                         pc1_res = None
+                         pc2_res = None
+                         for f in synced_batch:
+                              if f.camera_id == 'local_cam': pc1_res = f.results
+                              elif f.camera_id == 'cam_0': pc2_res = f.results
+                         
+                         self.db.save_synced_frame(time.time(), pc1_res, pc2_res, pose_3d)
+
                     if pose_3d:
                         print(f"✅ 3D Pose Computed! {len(pose_3d['pose_3d'])} landmarks")
                         # You can now save 'pose_3d' to CSV or visualize in 3D
