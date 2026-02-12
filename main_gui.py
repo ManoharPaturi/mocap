@@ -503,7 +503,37 @@ class MocapGUI:
                 self.fps_label.config(text=f"FPS: {fps:04.1f}")
             except: pass 
             
-            cv2.imshow("MoCap Live Feed", frame)
+            # --- DUAL CAMERA DISPLAY (Master Mode) ---
+            if MULTI_CAMERA_MODE == 'master' and self.coordinator:
+                # Get synchronized batch for remote camera
+                synced_batch = self.coordinator.get_synchronized_batch()
+                
+                if synced_batch and len(synced_batch) >= 1:
+                    # We have remote camera data
+                    remote_data = synced_batch[0]
+                    
+                    # Create placeholder for remote camera (black frame for now)
+                    # TODO: Decode actual frame from remote_data.results
+                    remote_frame = np.zeros_like(frame)
+                    
+                    # Add text labels
+                    cv2.putText(frame, "Local Camera (PC1)", (10, 30),
+                               cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                    cv2.putText(remote_frame, f"Remote Camera (PC2)", (10, 30),
+                               cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+                    
+                    # Combine side-by-side
+                    combined_frame = np.hstack([frame, remote_frame])
+                    cv2.imshow("Dual Camera View - Master", combined_frame)
+                else:
+                    # No remote data yet, show local only
+                    cv2.putText(frame, "Local Camera - Waiting for Remote...", (10, 30),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                    cv2.imshow("Dual Camera View - Master", frame)
+            else:
+                # Single camera mode or server mode
+                cv2.imshow("MoCap Live Feed", frame)
+            
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 self.running = False
                 break
