@@ -230,7 +230,7 @@ class MasterCoordinator:
     
     def _data_receiver(self):
         """Receive frame data from all connected cameras."""
-        print("[MasterCoordinator] _data_receiver thread STARTED")
+        print("[MasterCoordinator] Data receiver started")
         msg_count = 0
         
         while self.running and not self.stop_event.is_set():
@@ -241,8 +241,9 @@ class MasterCoordinator:
                         data = socket.recv()
                         msg_count += 1
                         
-                        if msg_count <= 10:
-                            print(f"[MasterCoordinator] Received message #{msg_count} from {camera_id}")
+                        # Debug only first 3 messages
+                        if msg_count <= 3:
+                            print(f"[MasterCoordinator] Receiving from {camera_id}")
                         
                         # Deserialize
                         if COMPRESS_NETWORK_DATA:
@@ -264,13 +265,10 @@ class MasterCoordinator:
         timestamp = msg.get('timestamp')
         results = msg.get('results')
         
-        # Debug first 5 processed frames
-        if self.stats['frames_received'].get(camera_id, 0) < 5:
-            print(f"[_process_frame_data] cam={camera_id}, frame={frame_number}, ts={timestamp}, results={'yes' if results else 'NO'}")
-        
         # Allow empty results dict (no detection) - still valid for sync
         if not all([camera_id, frame_number is not None, timestamp, results is not None]):
-            print(f"[_process_frame_data] SKIPPING: cam={camera_id}, frame={frame_number}, ts={timestamp}, results={'yes' if results is not None else 'NONE'}")
+            if self.stats['frames_received'].get(camera_id, 0) < 3:
+                print(f"[MasterCoordinator] Skipping invalid frame from {camera_id}")
             return
         
         # Create FrameData object
@@ -286,9 +284,9 @@ class MasterCoordinator:
         self.frame_buffers[camera_id].append(frame_data)
         self.stats['frames_received'][camera_id] += 1
         
-        # Debug
-        if self.stats['frames_received'][camera_id] <= 5:
-            print(f"[_process_frame_data] ✅ Added frame {frame_number} from {camera_id} to buffer (buffer size: {len(self.frame_buffers[camera_id])})")
+        # Debug only first 3 frames
+        if self.stats['frames_received'][camera_id] <= 3:
+            print(f"[MasterCoordinator] Buffered frame {frame_number} from {camera_id}")
     
     def get_synchronized_batch(self) -> Optional[List[FrameData]]:
         """

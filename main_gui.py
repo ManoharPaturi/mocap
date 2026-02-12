@@ -473,10 +473,9 @@ class MocapGUI:
                 self.network_server.send_frame_data(
                     self.frame_count, timestamp, results, frame  # Include frame for remote display
                 )
-                
-                # Debug for first 10 frames and every 60 frames
-                if self.frame_count <= 10 or self.frame_count % 60 == 0:
-                    print(f"[PC2 DEBUG Frame {self.frame_count}] Sent frame to network")
+                # Debug only first 3 frames
+                if self.frame_count <= 3:
+                    print(f"[SERVER] Sent frame {self.frame_count}")
             # -----------------------------------------
             
             # --- RECEIVE REMOTE CAMERA (Master Mode) ---
@@ -502,13 +501,11 @@ class MocapGUI:
                     # Use frame_buffers (plural) - it's a dict of deques
                     self.coordinator.frame_buffers['local_cam'].append(local_frame_data)
                     
-                    # Debug: Print buffer status for first 10 frames AND every 60 frames
-                    if self.frame_count <= 10 or self.frame_count % 60 == 0:
-                        buffer_sizes = {cam: len(buf) for cam, buf in self.coordinator.frame_buffers.items()}
-                        print(f"[PC1 DEBUG Frame {self.frame_count}] Buffers: {buffer_sizes}")
+                    # Debug only on errors
+                    pass
                 else:
-                    if self.frame_count <= 5:
-                        print(f"[PC1 ERROR] Coordinator has no frame_buffers attribute!")
+                    if self.frame_count <= 3:
+                        print(f"[MASTER ERROR] Coordinator has no frame_buffers attribute!")
             # -----------------------------------------
             
             if self.is_recording:
@@ -539,12 +536,7 @@ class MocapGUI:
                 # Get synchronized batch (should have local + remote)
                 synced_batch = self.coordinator.get_synchronized_batch()
                 
-                # Debug every 60 frames
-                if self.frame_count % 60 == 0:
-                    if synced_batch:
-                        print(f"[DEBUG] Synced batch size: {len(synced_batch)}")
-                    else:
-                        print(f"[DEBUG] No synced batch yet")
+                # Removed debug - only show sync success below
                 
                 if synced_batch and len(synced_batch) >= 2:
                     # We have BOTH cameras synchronized!
