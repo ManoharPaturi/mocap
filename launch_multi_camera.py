@@ -16,26 +16,47 @@ parser.add_argument('--remote-ip', type=str, default=None,
 args = parser.parse_args()
 
 # Update config dynamically
-import config
-config.MULTI_CAMERA_MODE = args.mode
+print("[LAUNCHER] Imports starting...")
+try:
+    import config
+    print("[LAUNCHER] Config imported.")
+    
+    # Update config dynamically
+    config.MULTI_CAMERA_MODE = args.mode
+    print(f"[LAUNCHER] Config mode set to: {args.mode}")
 
-if args.mode == 'master':
-    if args.remote_ip:
-        config.REMOTE_CAMERA_IP = args.remote_ip
+    if args.mode == 'master':
+        if args.remote_ip:
+            config.REMOTE_CAMERA_IP = args.remote_ip
+            print(f"[LAUNCHER] Remote IP set to: {args.remote_ip}")
+        else:
+            print("WARNING: Master mode requires --remote-ip argument!")
+            sys.exit(1)
+
+    print("[LAUNCHER] Importing GUI...")
+    from main_gui import MocapGUI
+    print("[LAUNCHER] GUI imported.")
+
+    print(f"\n{'='*60}")
+    print(f"VS5 Motion Capture System")
+    print(f"Mode: {args.mode.upper()}")
+    if args.mode == 'master':
+        print(f"Remote Camera: {config.REMOTE_CAMERA_IP}")
+    print(f"{'='*60}\n")
+    
+    print("[LAUNCHER] Initializing App...")
+    app = MocapGUI()
+    print("[LAUNCHER] App Initialized. Starting Video Loop...")
+    
+    if hasattr(app, 'run'):
+        app.run()
+    elif hasattr(app, 'video_loop'):
+        app.video_loop()
     else:
-        print("WARNING: Master mode requires --remote-ip argument!")
-        print("Example: python launch_multi_camera.py --mode master --remote-ip 10.51.179.228")
-        sys.exit(1)
-
-# Launch main GUI
-from main_gui import MocapGUI
-
-print(f"\n{'='*60}")
-print(f"VS5 Motion Capture System")
-print(f"Mode: {args.mode.upper()}")
-if args.mode == 'master':
-    print(f"Remote Camera: {config.REMOTE_CAMERA_IP}")
-print(f"{'='*60}\n")
-
-app = MocapGUI()
-app.run()
+        print("[ERROR] No run/video_loop method found on MocapGUI!")
+        
+except Exception as e:
+    print(f"\n[CRITICAL ERROR] Launcher failed: {e}")
+    import traceback
+    traceback.print_exc()
+    input("Press Enter to exit...")

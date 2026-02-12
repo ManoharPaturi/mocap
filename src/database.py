@@ -219,71 +219,88 @@ class MocapDB:
         self.queue.put(data)
 
     def _serialize_landmarks(self, results, key_or_attr):
-        """Convert MediaPipe results to JSON-serializable list."""
-        # Handle input: dictionary or object
+        """Convert MediaPipe results or FrameData results to JSON-serializable list."""
         val = None
+        
+        # 1. EXTRACT DATA
         if isinstance(results, dict):
              val = results.get(key_or_attr)
-             # If key_or_attr is 'pose', val is [NormalizedLandmarkList]
-             # If key_or_attr is 'pose_landmarks', val is same.
-             # In main_gui passing `results` dict -> has keys 'pose', 'face'
-             # In save_frame passing `results.get('pose')` -> object.
+             # Fallback: key 'pose' might contain object with 'pose_landmarks'
+             if not val and key_or_attr == 'pose_landmarks':
+                 val = results.get('pose')
         else:
              val = getattr(results, key_or_attr, None)
 
-        if not val:
-             # Try fallback: Maybe 'pose' key contains the landmarks directly?
-             if isinstance(results, dict) and key_or_attr == 'pose':
-                  # Check if it has 'pose_landmarks' attribute inside
-                  real_res = results.get('pose') # This might be the MediaPipe Solution Output
-                  if hasattr(real_res, 'pose_landmarks'):
-                       val = real_res.pose_landmarks
-        
         if not val: return []
         
-        # Handle FrameData serialized dicts (from master_coordinator)
-        # If 'val' is already a list of dicts (from remote), return it
-        if isinstance(val, list) and len(val) > 0 and isinstance(val[0], dict) and 'x' in val[0]:
-             # It's already serialized landmark data (e.g. from remote PC2)
-             # But wait, it might be list of lists (people) -> list of landmarks
-             return [val] # Wrap single person in list of people if needed? 
-             # Remote sends: results['pose'] = [{'x':...}, ...] (Single person flattened?)
-             # Let's assume standardized format: List[List[Dict]] (People -> Landmarks)
-             pass
-
-        # If val is MediaPipe Object (NormalizedLandmarkList)
-        # Or list of such objects
-        all_people = []
+        # 2. NORMALIZE TO LIST OF PEOPLE [(lm1, lm2...), (lm1...)]
+        all_people_landmarks = []
         
-        # Helper to process one person's landmarks
-        def process_person(landmarks):
-            person_data = []
-            for lm in landmarks:
-                # Handle both object (lm.x) and dict (lm['x'])
-                if isinstance(lm, dict):
-                    lm_dict = {'x': round(lm.get('x',0), 5), 'y': round(lm.get('y',0), 5), 'z': round(lm.get('z',0), 5)}
-                    if 'visibility' in lm: lm_dict['v'] = round(lm['visibility'], 5)
-                else:
-                    lm_dict = {'x': round(lm.x, 5), 'y': round(lm.y, 5), 'z': round(lm.z, 5)}
-                    if hasattr(lm, 'visibility'):
-                        lm_dict['v'] = round(lm.visibility, 5)
-                person_data.append(lm_dict)
-            return person_data
-
-        if isinstance(val, list):
-             # Could be list of landmarks (1 person) or list of lists
-             if not val: return []
-             if hasattr(val[0], 'x') or isinstance(val[0], dict):
-                  # Single list of landmarks (1 person)
-                  all_people.append(process_person(val))
-             else:
-                  # List of lists?
-                  pass
+        # CASE A: MediaPipe Solution Output (Object)
+        # It has .pose_landmarks or .face_landmarks attribute which is a LIST of NormalizedLandmarkList
+        if hasattr(val, 'pose_landmarks'):
+             all_people_landmarks = val.pose_landmarks
+        elif hasattr(val, 'face_landmarks'):
+             all_people_landmarks = val.face_landmarks
+        elif hasattr(val, 'hand_landmarks'):
+             all_people_landmarks = val.hand_landmarks
+             
+        # CASE B: Already a list (Direct access or deserialized)
+        elif isinstance(val, list):
+             all_people_landmarks = val
+             
+        # CASE C: Single NormalizedLandmarkList (Rare, but possible in some MP versions)
+        elif hasattr(val, 'landmark'): # It's a single set of landmarks
+             all_people_landmarks = [val]
+             
         else:
-             # Single object with iterable landmarks
-             all_people.append(process_person(val))
+             # Unknown type or empty
+             return []
 
-        return all_people
+        if not all_people_landmarks: return []
+
+        # 3. SERIALIZE EACH PERSON
+        serialized_people = []
+        
+        for person in all_people_landmarks:
+             # 'person' is a list of landmarks (or NormalizedLandmarkList)
+             # OR 'person' is a dict (if already serialized)?
+             
+             # Check if 'person' is actually a full result object (nested error case)
+             if hasattr(person, 'pose_landmarks'): 
+                 continue # Skip invalid nesting
+                 
+             person_data = []
+             
+             # Iterate landmarks in this person
+             try:
+                 for lm in person:
+                     lm_dict = {}
+                     # Handle Obj vs Dict
+                     if isinstance(lm, dict):
+                         lm_dict = {
+                             'x': round(lm.get('x',0), 5), 
+                             'y': round(lm.get('y',0), 5), 
+                             'z': round(lm.get('z',0), 5)
+                         }
+                         if 'v' in lm: lm_dict['v'] = lm['v']
+                         elif 'visibility' in lm: lm_dict['v'] = lm['visibility']
+                     else:
+                         # MediaPipe Landmark Object
+                         lm_dict = {
+                             'x': round(lm.x, 5), 
+                             'y': round(lm.y, 5), 
+                             'z': round(lm.z, 5)
+                         }
+                         if hasattr(lm, 'visibility'):
+                             lm_dict['v'] = round(lm.visibility, 5)
+                     
+                     person_data.append(lm_dict)
+                 serialized_people.append(person_data)
+             except TypeError:
+                 pass # Not iterable
+
+        return serialized_people
 
     def _worker_loop(self):
         """Background thread to batch insert data."""

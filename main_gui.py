@@ -21,7 +21,9 @@ if MULTI_CAMERA_MODE == 'server':
     from src.camera_server import CameraServer
 elif MULTI_CAMERA_MODE == 'master':
     from src.master_coordinator import MasterCoordinator
+    from src.master_coordinator import MasterCoordinator
     from src.triangulation import Triangulator
+    from src.live_visualizer_3d import LiveVisualizer3D
 
 class MocapGUI:
     def __init__(self):
@@ -37,7 +39,10 @@ class MocapGUI:
         # Multi-camera network components
         self.network_server = None
         self.coordinator = None
+        self.network_server = None
+        self.coordinator = None
         self.triangulator = None
+        self.live_viz = None # Real-time Matplotlib Window
         self.remote_frame = None  # Buffer for remote camera frame
         
         # Initialize network based on mode
@@ -56,6 +61,7 @@ class MocapGUI:
                 self.coordinator.discover_cameras_manual([REMOTE_CAMERA_IP])
                 # Triangulator with no calibration for now (will load when available)
                 self.triangulator = Triangulator(calibration=None)
+                self.live_viz = LiveVisualizer3D()
                 print(f"[GUI] Master Coordinator started - connecting to {REMOTE_CAMERA_IP}")
         
         # State
@@ -63,6 +69,16 @@ class MocapGUI:
         self.is_recording = False
         self.session_id = None
         self.frame_count = 0
+
+        # Thread-safe GUI State Caches (Initialize defaults)
+        self.mirror_active = True
+        self.markers_active = True
+        self.roi_active = False
+        self.face_det_active = True
+        self.hand_det_active = True
+        self.gamma_val = 1.0
+        self.exposure_active = False
+        self.model_type = "FULL"
         
         # Kinematics State
         self.prev_lm = []
@@ -253,12 +269,14 @@ class MocapGUI:
         self.mirror_var = tk.BooleanVar(value=True) # Default Mirror: ON
         tk.Checkbutton(toggle_frame, text="Mirror Camera", variable=self.mirror_var,
                        bg='#0f0f1e', fg='#e0e0e0', selectcolor='#0f0f1e',
-                       activebackground='#0f0f1e', activeforeground='#e0e0e0').pack(side=tk.LEFT, padx=10)
+                       activebackground='#0f0f1e', activeforeground='#e0e0e0',
+                       command=self.update_toggles).pack(side=tk.LEFT, padx=10)
                        
         self.markers_var = tk.BooleanVar(value=True) # Default Markers: ON
         tk.Checkbutton(toggle_frame, text="Show Markers", variable=self.markers_var,
                        bg='#0f0f1e', fg='#e0e0e0', selectcolor='#0f0f1e',
-                       activebackground='#0f0f1e', activeforeground='#e0e0e0').pack(side=tk.LEFT, padx=10)
+                       activebackground='#0f0f1e', activeforeground='#e0e0e0',
+                       command=self.update_toggles).pack(side=tk.LEFT, padx=10)
         
         self.record_btn = tk.Button(control_frame, text="▶ Start Capture",
                                     command=self.toggle_recording,
@@ -315,24 +333,50 @@ class MocapGUI:
                                       width=18, bd=0, relief=tk.FLAT)
         self.download_btn.pack(pady=5)
         
-        self.viz_btn = tk.Button(control_frame, text="📊 Visualize 3D",
+        self.viz_btn = tk.Button(control_frame, text="📊 Visualize Session",
                                       command=self.show_visualization,
                                       font=("Arial", 12),
                                       bg='#1a1a2e', fg='#00d4ff', # Cyan for Viz
                                       width=18, bd=0, relief=tk.FLAT)
         self.viz_btn.pack(pady=5)
+
+        if MULTI_CAMERA_MODE == 'master':
+             self.live_btn = tk.Button(control_frame, text="Current Live 3D",
+                                          command=self.toggle_live_3d,
+                                          font=("Arial", 12),
+                                          bg='#1a1a2e', fg='#ffa500', # Orange
+                                          width=18, bd=0, relief=tk.FLAT)
+             self.live_btn.pack(pady=5)
+        
+        # Initial attribute sync
+        self.update_toggles()
+        self.update_imaging()
         
 
+
+    def update_toggles(self):
+        """Cache simple toggles for thread safety."""
+        try:
+            self.mirror_active = self.mirror_var.get()
+            self.markers_active = self.markers_var.get()
+        except: pass
 
     def update_imaging(self, _=None):
         """Update detector imaging params from GUI."""
         try:
+            # Cache values for thread safety check (optional, but good practice)
+            self.gamma_val = self.gamma_var.get()
+            self.exposure_active = self.exposure_var.get()
+            self.face_det_active = self.face_det_var.get()
+            self.hand_det_active = self.hand_det_var.get()
+            self.roi_active = self.roi_var.get()
+            
             self.detector.set_imaging_params(
-                gamma=self.gamma_var.get(),
-                face_exposure=self.exposure_var.get(),
-                enable_face=self.face_det_var.get(),
-                enable_hand=self.hand_det_var.get(),
-                enable_roi=self.roi_var.get()
+                gamma=self.gamma_val,
+                face_exposure=self.exposure_active,
+                enable_face=self.face_det_active,
+                enable_hand=self.hand_det_active,
+                enable_roi=self.roi_active
             )
         except Exception as e:
             print(f"Error updating imaging: {e}")
@@ -346,7 +390,7 @@ class MocapGUI:
             print(f"Error reloading model: {e}")
 
     def show_visualization(self):
-        """Callback to launch 3D viz and generate report."""
+        """Callback to launch Session Dashboard (HTML)."""
         try:
             # 1. Open Interactive Dashboard (HTML)
             self.viz_3d.plot_latest_session()
@@ -358,6 +402,14 @@ class MocapGUI:
                 
         except Exception as e:
             messagebox.showerror("Error", f"Viz failed: {e}")
+
+    def toggle_live_3d(self):
+        """Enable/Disable Live Matplotlib Window."""
+        if self.live_viz:
+             if self.live_viz.initialized:
+                 self.live_viz.close()
+             else:
+                 self.live_viz.init_plot()
 
     def toggle_recording(self):
         if not self.is_recording:
@@ -404,7 +456,7 @@ class MocapGUI:
                 continue
             
             # 1. Mirroring (Horizontal Flip)
-            if self.mirror_var.get():
+            if self.mirror_active:
                 frame = cv2.flip(frame, 1)
             
             # Process & Save
@@ -466,7 +518,7 @@ class MocapGUI:
             # -------------------------
             
             # --- DRAW VISUALIZATION FIRST (for network transmission) ---
-            if self.markers_var.get() and results:
+            if self.markers_active and results:
                 frame = self.visualizer.draw_landmarks(frame, results)
             # -----------------------------------------------------------
             
@@ -530,7 +582,7 @@ class MocapGUI:
             self.frame_count += 1
 
             # 2. Draw Markers (Toggle)
-            if self.markers_var.get():
+            if self.markers_active:
                 if DRAW_LANDMARKS:
                     frame = self.visualizer.draw_landmarks(frame, results)
             
@@ -589,8 +641,15 @@ class MocapGUI:
                          self.db.save_synced_frame(time.time(), pc1_res, pc2_res, pose_3d)
 
                     if pose_3d:
-                        print(f"✅ 3D Pose Computed! {len(pose_3d['pose_3d'])} landmarks")
-                        # You can now save 'pose_3d' to CSV or visualize in 3D
+                        print(f"✅ 3D Pose Computed! {len(pose_3d.get('pose_3d',[]))} landmarks")
+                        # Update Live 3D View (Main Thread Call not strictly needed for MPL interactive mode if careful)
+                        if self.live_viz and self.live_viz.initialized:
+                             # MPL is not thread safe, but ion() + pause() sometimes works. 
+                             # Safest is to schedule it? No, pause() blocks.
+                             # Let's try direct update first, if it crashes we wrap in after()
+                             try:
+                                 self.live_viz.update(pose_3d)
+                             except: pass
                 
                 # Fallback to cached if no new frame decoded
                 if remote_frame is None and self.remote_frame is not None:
@@ -665,6 +724,30 @@ class MocapGUI:
             except: pass
 
         ts = time.strftime("%H:%M:%S")
+        try:
+            self.tree.insert("", 0, values=(ts, *row_values))
+        except: pass
+        
+        children = self.tree.get_children()
+        if len(children) > 10:
+            self.tree.delete(children[-1])
+
+    def run(self):
+        """Start the application (blocking)."""
+        # Thread is already started in __init__
+        try:
+            self.root.mainloop()
+        except KeyboardInterrupt:
+            self.running = False
+            self.cleanup()
+
+    def cleanup(self):
+        self.running = False
+        if self.camera: self.camera.release()
+        if self.db: self.db.stop_recording()
+        if self.network_server: self.network_server.stop()
+        if self.coordinator: self.coordinator.stop()
+        if self.root: self.root.quit()
         self.tree.insert("", 0, values=(ts, *row_values))
         
         children = self.tree.get_children()
