@@ -542,8 +542,9 @@ class MocapGUI:
                     # We have BOTH cameras synchronized!
                     print(f"✅ Synced batch: {len(synced_batch)} cameras")
                     
-                    # Separate local and remote
-                    local_frame_display = frame.copy()
+                    # Resize local frame for better side-by-side view
+                    display_width, display_height = 640, 480
+                    local_frame_display = cv2.resize(frame, (display_width, display_height))
                     
                     # Decode remote camera frame from sync batch
                     remote_frame = None
@@ -555,26 +556,29 @@ class MocapGUI:
                                 try:
                                     jpg_bytes = frame_data.results['frame_jpeg']
                                     jpg_np = np.frombuffer(jpg_bytes, dtype=np.uint8)
-                                    remote_frame = cv2.imdecode(jpg_np, cv2.IMREAD_COLOR)
+                                    decoded_frame = cv2.imdecode(jpg_np, cv2.IMREAD_COLOR)
+                                    if decoded_frame is not None:
+                                        remote_frame = cv2.resize(decoded_frame, (display_width, display_height))
+                                        # Cache for next time in case of frame drop
+                                        self.remote_frame = remote_frame
                                 except Exception as e:
                                     print(f"[ERROR] Failed to decode remote frame: {e}")
                             break
                     
-                    # Fallback to black if decode failed
+                    # Use cached frame if decode failed (smoother display)
                     if remote_frame is None:
-                        remote_frame = np.zeros_like(frame)
-                        cv2.putText(remote_frame, "No video data from PC2", (10, 60),
-                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                    
-                    # Ensure same size
-                    if remote_frame.shape != local_frame_display.shape:
-                        remote_frame = cv2.resize(remote_frame, (local_frame_display.shape[1], local_frame_display.shape[0]))
+                        if self.remote_frame is not None:
+                            remote_frame = self.remote_frame  # Use last good frame
+                        else:
+                            remote_frame = np.zeros((display_height, display_width, 3), dtype=np.uint8)
+                            cv2.putText(remote_frame, "No video data from PC2", (10, 60),
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                     
                     # Add text labels
                     cv2.putText(local_frame_display, "Local Camera (PC1)", (10, 30),
-                               cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                     cv2.putText(remote_frame, "Remote Camera (PC2)", (10, 30),
-                               cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
                     
                     # Combine side-by-side
                     combined_frame = np.hstack([local_frame_display, remote_frame])
