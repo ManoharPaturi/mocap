@@ -500,6 +500,11 @@ class MocapGUI:
                     # Keep buffer size reasonable
                     if len(self.coordinator.frame_buffer['local_cam']) > 30:
                         self.coordinator.frame_buffer['local_cam'].pop(0)
+                    
+                    # Debug: Print buffer status every 60 frames
+                    if self.frame_count % 60 == 0:
+                        buffer_sizes = {cam: len(buf) for cam, buf in self.coordinator.frame_buffer.items()}
+                        print(f"[DEBUG] Frame buffers: {buffer_sizes}")
             # -----------------------------------------
             
             if self.is_recording:
@@ -529,6 +534,13 @@ class MocapGUI:
             if MULTI_CAMERA_MODE == 'master' and self.coordinator:
                 # Get synchronized batch (should have local + remote)
                 synced_batch = self.coordinator.get_synchronized_batch()
+                
+                # Debug every 60 frames
+                if self.frame_count % 60 == 0:
+                    if synced_batch:
+                        print(f"[DEBUG] Synced batch size: {len(synced_batch)}")
+                    else:
+                        print(f"[DEBUG] No synced batch yet")
                 
                 if synced_batch and len(synced_batch) >= 2:
                     # We have BOTH cameras synchronized!
