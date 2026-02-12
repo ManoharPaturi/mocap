@@ -487,7 +487,8 @@ class MocapGUI:
                     camera_id='local_cam',
                     frame_number=self.frame_count,
                     timestamp=timestamp,
-                    results=results
+                    results=results,
+                    received_at=timestamp  # Add received_at (same as timestamp for local)
                 )
                 
                 # Add to coordinator's buffer manually
