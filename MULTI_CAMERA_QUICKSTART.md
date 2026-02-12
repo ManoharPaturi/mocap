@@ -1,41 +1,40 @@
-# VS5 Multi-Camera Quick Start
+# Corrected Multi-Camera Setup
 
-## Single Camera Mode (Normal)
-
-```bash
-python main_gui.py
+## PC1 (Windows) - MASTER
+```powershell
+.\venv\Scripts\Activate.ps1
+python launch_multi_camera.py --mode master --remote-ip <PC2_IP>
 ```
 
-## Multi-Camera Setup
+**What PC1 shows:**
+- Dual camera view (local + remote side-by-side)
+- Synchronized frames from both cameras
+- 3D triangulation (future)
 
-### PC1 (Camera Server):
+---
+
+## PC2 (Mac) - SERVER
 ```bash
+source venv/bin/activate
 python launch_multi_camera.py --mode server
 ```
 
-### PC2 (Master Coordinator):
+**What PC2 shows:**
+- Local camera feed with landmarks
+- Broadcasts to PC1 in background
+
+---
+
+## Current Status
+✅ Network connection working
+✅ Frame synchronization (310+ batches)
+✅ Both systems running full GUI
+🔄 Dual display on PC1 (showing placeholder for remote - will decode actual frames next)
+
+## Next: Get PC2's IP
+On PC2 (Mac):
 ```bash
-python launch_multi_camera.py --mode master --remote-ip 10.51.179.228
+ifconfig en0 | grep "inet " | awk '{print $2}'
 ```
 
-Replace `10.51.179.228` with PC1's actual IP address (check with `ipconfig` on Windows).
-
----
-
-## What Happens
-
-**PC1 Server:**
-- Full GUI with detection, visualization, database, reports
-- Broadcasts detection results to PC2 over network
-
-**PC2 Master:**
-- Full GUI with detection from local camera
-- Receives + synchronizes frames from PC1
-- Shows both cameras (future: side-by-side display)
-- 3D pose triangulation from stereo views
-
----
-
-## Firewall Note
-
-Make sure ports 5000-5001 are allowed in Windows Firewall (see README).
+Then relaunch PC1 with that IP!

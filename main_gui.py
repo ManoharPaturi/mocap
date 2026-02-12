@@ -4,6 +4,8 @@ from tkinter import ttk, messagebox
 import threading
 import time
 import numpy as np
+import platform
+import os
 from src.camera import Camera
 from src.detector import MocapDetector
 from src.visualizer import Visualizer
@@ -88,6 +90,10 @@ class MocapGUI:
         
         # Setup GUI First (Important: Initialize vars before thread starts)
         self.setup_gui()
+        
+        # Mac OpenCV fix: Start window thread before video loop
+        if platform.system() == 'Darwin':  # macOS
+            cv2.startWindowThread()
         
         # Start Video Thread
         self.running = True
