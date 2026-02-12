@@ -351,15 +351,72 @@ class MasterCoordinator:
                 self.stats['sync_failures'] += 1
                 return None
         
-        # Remove consumed frames from buffers
-        for frame in synced_frames:
-            # Remove this frame and all older frames
-            buffer = self.frame_buffers[frame.camera_id]
-            while buffer and buffer[0].timestamp <= frame.timestamp:
-                buffer.popleft()
+        if len(synced_frames) == self.num_cameras:
+            # We found a match for every camera!
+            
+            # Remove used frames from buffers
+            for frame in synced_frames:
+                # Remove this frame and all older frames
+                while len(self.frame_buffers[frame.camera_id]) > 0:
+                    old_frame = self.frame_buffers[frame.camera_id].popleft()
+                    if old_frame == frame:
+                        break
+            
+            self.stats['frames_synced'] += 1
+            return synced_frames
+            
+        return None
+
+    def get_synced_3d_pose(self, synced_frames: List[FrameData]) -> Optional[Dict[str, Any]]:
+        """
+        Compute 3D pose from a list of synchronized 2D frames.
         
-        self.stats['frames_synced'] += 1
-        return synced_frames
+        Args:
+            synced_frames: List of FrameData objects (must be synced)
+            
+        Returns:
+            Dictionary containing 3D landmarks if successful, None otherwise
+        """
+        if not self.triangulator:
+            return None
+            
+        # Collect 2D observations for each landmark
+        # Structure: {landmark_id: {'cam_id': (x, y), ...}}
+        landmark_observations = defaultdict(dict)
+        
+        for frame in synced_frames:
+            if not frame.results or 'pose' not in frame.results or not frame.results['pose']:
+                continue
+                
+            # Iterate through all 33 pose landmarks
+            for idx, lm in enumerate(frame.results['pose']):
+                # In MediaPipe, x/y are normalized [0,1]. Convert to pixels.
+                # Use default 1280x720 if image size unknown
+                w, h = 1280, 720 
+                
+                # Check visibility
+                if lm.visibility > 0.5:
+                    x_px = lm.x * w
+                    y_px = lm.y * h
+                    landmark_observations[idx][frame.camera_id] = np.array([x_px, y_px])
+        
+        # Triangulate each landmark
+        landmarks_3d = {}
+        for lm_id, observations in landmark_observations.items():
+            if len(observations) >= 2:  # Need at least 2 views
+                point_3d = self.triangulator.triangulate_point(observations)
+                if point_3d:
+                    landmarks_3d[lm_id] = {
+                        'x': point_3d.x,
+                        'y': point_3d.y,
+                        'z': point_3d.z,
+                        'visibility': point_3d.confidence
+                    }
+        
+        if not landmarks_3d:
+            return None
+            
+        return {'pose_3d': landmarks_3d}
     
     def discover_cameras(self, timeout: float = 5.0) -> List[CameraInfo]:
         """

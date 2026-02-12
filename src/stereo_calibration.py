@@ -39,39 +39,9 @@ class StereoCalibration:
         )
         print("[StereoCalibration] Initialized")
     
-    def create_dummy_calibration(self, width=1280, height=720):
-        """
-        Create dummy calibration for testing without physical calibration.
-        Assumes two cameras side-by-side.
-        """
-        print("[StereoCalibration] Creating DUMMY calibration")
-        
-        # 1. Dummy Intrinsics (Same for both)
-        # Focal length approx 1000 for 720p is common
-        K = np.array([
-            [1000.0, 0.0, width/2],
-            [0.0, 1000.0, height/2],
-            [0.0, 0.0, 1.0]
-        ])
-        D = np.zeros(5) # No distortion
-        
-        cal1 = CameraCalibration("local_cam", K, D, image_size=(width, height))
-        cal2 = CameraCalibration("cam_0", K, D, image_size=(width, height))
-        
-        # 2. Dummy Extrinsics (Camera 1 at origin)
-        cal1.rotation = np.eye(3)
-        cal1.translation = np.zeros((3, 1))
-        
-        # Camera 2 is 1 meter to the right of Camera 1
-        cal2.rotation = np.eye(3) 
-        # T is position of world origin in Cam2 frame
-        # If Cam2 is at (1, 0, 0) relative to Cam1:
-        cal2.translation = np.array([[-1.0], [0.0], [0.0]]) 
-        
-        self.cameras["local_cam"] = cal1
-        self.cameras["cam_0"] = cal2
-        
-        return cal1, cal2
+    def calibrate_intrinsic(
+        self,
+        camera_id: str,
         images: List[np.ndarray],
         checkerboard_size: Tuple[int, int] = (9, 6),
         square_size: float = 0.025  # meters
@@ -376,7 +346,6 @@ class StereoCalibration:
         
         return P
 
-
     def create_default_calibration(self, width: int = 1280, height: int = 720) -> None:
         """
         Create a default/approximate calibration for immediate use.
@@ -418,6 +387,7 @@ class StereoCalibration:
             image_size=(width, height)
         )
         print("[StereoCalibration] Default calibration created (Baseline: 1.0m)")
+
 
 if __name__ == "__main__":
     print("Stereo Calibration Module - Test")
