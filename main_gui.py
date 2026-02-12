@@ -472,17 +472,22 @@ class MocapGUI:
                                                  results.get('left_hand'), results.get('right_hand'))
             # -----------------------------------------------------------
             
-            # --- NETWORK BROADCASTING (Server Mode) ---
+            # --- NETWORK BROADCASTING (Server Mode) - ASYNC ---
             if self.network_server:
-                # Broadcast detection results AND visualized frame to network
-                # Use wall-clock time (epoch nanoseconds) for cross-machine sync
+                # Non-blocking: send in background thread (like DB saves)
                 timestamp = int(time.time() * 1e9)
-                self.network_server.send_frame_data(
-                    self.frame_count, timestamp, results, frame  # Now includes visualization!
-                )
+                frame_copy = frame.copy()  # Copy to avoid race conditions
+                
+                # Send async (don't wait for JPEG encoding)
+                threading.Thread(
+                    target=self.network_server.send_frame_data,
+                    args=(self.frame_count, timestamp, results, frame_copy),
+                    daemon=True
+                ).start()
+                
                 # Debug only first 3 frames
                 if self.frame_count <= 3:
-                    print(f"[SERVER] Sent frame {self.frame_count}")
+                    print(f"[SERVER] Queued frame {self.frame_count}")
             # -----------------------------------------
             
             # --- RECEIVE REMOTE CAMERA (Master Mode) ---
