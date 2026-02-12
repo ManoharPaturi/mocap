@@ -185,31 +185,32 @@ class CameraServer:
         
         # Serialize pose landmarks
         if 'pose_landmarks' in results and results['pose_landmarks']:
-            serialized['pose_landmarks'] = [
-                self._serialize_landmark_list(lm_list) 
-                for lm_list in results['pose_landmarks']
-            ]
+            # Check if already serialized (list of dicts)
+            if isinstance(results['pose_landmarks'][0], list) and isinstance(results['pose_landmarks'][0][0], dict):
+                serialized['pose_landmarks'] = results['pose_landmarks']
+            else:
+                serialized['pose_landmarks'] = [
+                    self._serialize_landmark_list(lm_list) 
+                    for lm_list in results['pose_landmarks']
+                ]
         
         # Serialize pose world landmarks
         if 'pose_world_landmarks' in results and results['pose_world_landmarks']:
-            serialized['pose_world_landmarks'] = [
-                self._serialize_landmark_list(lm_list) 
-                for lm_list in results['pose_world_landmarks']
-            ]
+            if isinstance(results['pose_world_landmarks'][0], list) and isinstance(results['pose_world_landmarks'][0][0], dict):
+                serialized['pose_world_landmarks'] = results['pose_world_landmarks']
+            else:
+                serialized['pose_world_landmarks'] = [
+                    self._serialize_landmark_list(lm_list) 
+                    for lm_list in results['pose_world_landmarks']
+                ]
         
         # Serialize face landmarks (optional)
         if 'face_landmarks' in results and results['face_landmarks']:
-            serialized['face_landmarks'] = [
-                self._serialize_landmark_list(lm_list) 
-                for lm_list in results['face_landmarks']
-            ]
+            serialized['face_landmarks'] = results['face_landmarks']
         
         # Serialize hand landmarks (optional)
         if 'hand_landmarks' in results and results['hand_landmarks']:
-            serialized['hand_landmarks'] = [
-                self._serialize_landmark_list(lm_list) 
-                for lm_list in results['hand_landmarks']
-            ]
+            serialized['hand_landmarks'] = results['hand_landmarks']
         
         return serialized
     
