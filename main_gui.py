@@ -496,22 +496,17 @@ class MocapGUI:
                 )
                 
                 # Add to coordinator's buffer manually
-                if hasattr(self.coordinator, 'frame_buffer'):
-                    if 'local_cam' not in self.coordinator.frame_buffer:
-                        self.coordinator.frame_buffer['local_cam'] = []
-                    self.coordinator.frame_buffer['local_cam'].append(local_frame_data)
-                    
-                    # Keep buffer size reasonable
-                    if len(self.coordinator.frame_buffer['local_cam']) > 30:
-                        self.coordinator.frame_buffer['local_cam'].pop(0)
+                if hasattr(self.coordinator, 'frame_buffers'):
+                    # Use frame_buffers (plural) - it's a dict of deques
+                    self.coordinator.frame_buffers['local_cam'].append(local_frame_data)
                     
                     # Debug: Print buffer status for first 10 frames AND every 60 frames
                     if self.frame_count <= 10 or self.frame_count % 60 == 0:
-                        buffer_sizes = {cam: len(buf) for cam, buf in self.coordinator.frame_buffer.items()}
+                        buffer_sizes = {cam: len(buf) for cam, buf in self.coordinator.frame_buffers.items()}
                         print(f"[PC1 DEBUG Frame {self.frame_count}] Buffers: {buffer_sizes}")
                 else:
                     if self.frame_count <= 5:
-                        print(f"[PC1 ERROR] Coordinator has no frame_buffer attribute!")
+                        print(f"[PC1 ERROR] Coordinator has no frame_buffers attribute!")
             # -----------------------------------------
             
             if self.is_recording:
