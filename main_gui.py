@@ -472,6 +472,10 @@ class MocapGUI:
                 self.network_server.send_frame_data(
                     self.frame_count, timestamp, results
                 )
+                
+                # Debug for first 10 frames and every 60 frames
+                if self.frame_count <= 10 or self.frame_count % 60 == 0:
+                    print(f"[PC2 DEBUG Frame {self.frame_count}] Sent frame to network")
             # -----------------------------------------
             
             # --- RECEIVE REMOTE CAMERA (Master Mode) ---
@@ -504,7 +508,10 @@ class MocapGUI:
                     # Debug: Print buffer status for first 10 frames AND every 60 frames
                     if self.frame_count <= 10 or self.frame_count % 60 == 0:
                         buffer_sizes = {cam: len(buf) for cam, buf in self.coordinator.frame_buffer.items()}
-                        print(f"[DEBUG Frame {self.frame_count}] Buffers: {buffer_sizes}")
+                        print(f"[PC1 DEBUG Frame {self.frame_count}] Buffers: {buffer_sizes}")
+                else:
+                    if self.frame_count <= 5:
+                        print(f"[PC1 ERROR] Coordinator has no frame_buffer attribute!")
             # -----------------------------------------
             
             if self.is_recording:
