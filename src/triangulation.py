@@ -39,15 +39,18 @@ class Triangulator:
     Uses Direct Linear Transform (DLT) for triangulation.
     """
     
-    def __init__(self, calibration: StereoCalibration):
+    def __init__(self, calibration: StereoCalibration = None):
         """
         Initialize triangulator with camera calibration.
         
         Args:
-            calibration: StereoCalibration object with camera parameters
+            calibration: StereoCalibration object with camera parameters (optional)
         """
         self.calibration = calibration
-        print(f"[Triangulator] Initialized with {len(calibration.cameras)} cameras")
+        if calibration is not None:
+            print(f"[Triangulator] Initialized with {len(calibration.cameras)} cameras")
+        else:
+            print("[Triangulator] Initialized without calibration (will load later)")
     
     def triangulate_point(
         self,
