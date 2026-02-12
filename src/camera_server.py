@@ -8,6 +8,7 @@ import msgpack
 import time
 import json
 import socket
+import cv2
 from typing import Optional, Dict, Any
 from threading import Thread, Event
 from config import (
@@ -141,26 +142,36 @@ class CameraServer:
             # Broadcast every 2 seconds
             time.sleep(2.0)
     
-    def send_frame_data(self, frame_number: int, timestamp: float, results: Dict[str, Any]):
+    def send_frame_data(self, frame_number: int, timestamp: float, results: Dict[str, Any], frame=None):
         """
-        Send detection results to master.
+        Send detection results and frame to master.
         
         Args:
             frame_number: Sequential frame number
-            timestamp: High-precision timestamp (from time.perf_counter_ns())
+            timestamp: High-precision timestamp (from time.time() * 1e9)
             results: Detection results from MocapDetector
+            frame: Optional numpy array of the camera frame (will be JPEG encoded)
         """
         if not self.running:
             return
         
         try:
+            # Encode frame as JPEG if provided
+            frame_jpeg = None
+            if frame is not None:
+                # Compress to JPEG (quality 85 for balance)
+                success, jpeg_buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                if success:
+                    frame_jpeg = jpeg_buffer.tobytes()
+            
             # Package frame data
             frame_data = {
                 'type': 'frame_data',
                 'camera_id': self.camera_id,
                 'frame_number': frame_number,
                 'timestamp': timestamp,
-                'results': self._serialize_results(results)
+                'results': self._serialize_results(results),
+                'frame_jpeg': frame_jpeg  # JPEG-encoded frame bytes
             }
             
             # Serialize

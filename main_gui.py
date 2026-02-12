@@ -471,7 +471,7 @@ class MocapGUI:
                 # Use wall-clock time (epoch nanoseconds) for cross-machine sync
                 timestamp = int(time.time() * 1e9)
                 self.network_server.send_frame_data(
-                    self.frame_count, timestamp, results
+                    self.frame_count, timestamp, results, frame  # Include frame for remote display
                 )
                 
                 # Debug for first 10 frames and every 60 frames
@@ -551,13 +551,37 @@ class MocapGUI:
                     print(f"✅ Synced batch: {len(synced_batch)} cameras")
                     
                     # Separate local and remote
-                    local_frame_display = frame
-                    remote_frame = np.zeros_like(frame)  # Placeholder for now
+                    local_frame_display = frame.copy()
+                    
+                    # Decode remote camera frame from sync batch
+                    remote_frame = None
+                    for frame_data in synced_batch:
+                        if frame_data.camera_id != 'local_cam':
+                            # This is the remote camera
+                            if 'frame_jpeg' in frame_data.results and frame_data.results['frame_jpeg']:
+                                # Decode JPEG frame
+                                try:
+                                    jpg_bytes = frame_data.results['frame_jpeg']
+                                    jpg_np = np.frombuffer(jpg_bytes, dtype=np.uint8)
+                                    remote_frame = cv2.imdecode(jpg_np, cv2.IMREAD_COLOR)
+                                except Exception as e:
+                                    print(f"[ERROR] Failed to decode remote frame: {e}")
+                            break
+                    
+                    # Fallback to black if decode failed
+                    if remote_frame is None:
+                        remote_frame = np.zeros_like(frame)
+                        cv2.putText(remote_frame, "No video data from PC2", (10, 60),
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                    
+                    # Ensure same size
+                    if remote_frame.shape != local_frame_display.shape:
+                        remote_frame = cv2.resize(remote_frame, (local_frame_display.shape[1], local_frame_display.shape[0]))
                     
                     # Add text labels
                     cv2.putText(local_frame_display, "Local Camera (PC1)", (10, 30),
                                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-                    cv2.putText(remote_frame, f"Remote Camera (PC2) - {len(synced_batch)} cams", (10, 30),
+                    cv2.putText(remote_frame, "Remote Camera (PC2)", (10, 30),
                                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
                     
                     # Combine side-by-side
