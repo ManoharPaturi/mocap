@@ -1,5 +1,6 @@
 # Camera Settings
-CAMERA_ID = 0
+CAMERA_ID = 0  # Device ID for cv2.VideoCapture (integer: 0, 1, 2, ...)
+NETWORK_CAMERA_ID = 'cam_0'  # Network identifier (string: 'cam_0', 'cam_1', ...)
 FRAME_WIDTH = 1280
 FRAME_HEIGHT = 720
 FPS = 30
@@ -148,7 +149,6 @@ PRESETS = {
 # Multi-Camera Mode
 ENABLE_MULTI_CAMERA = False
 CAMERA_ROLE = 'single'  # 'single', 'server', or 'master'
-CAMERA_ID = 'cam_0'     # Unique identifier for this camera
 NUM_CAMERAS = 2         # Total number of cameras in setup
 
 # --- GUI Integration Mode (NEW) ---

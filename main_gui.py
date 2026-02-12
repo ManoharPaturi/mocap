@@ -40,7 +40,8 @@ class MocapGUI:
         
         # Initialize network based on mode
         if MULTI_CAMERA_MODE == 'server':
-            self.network_server = CameraServer('cam_0')
+            from config import NETWORK_CAMERA_ID
+            self.network_server = CameraServer(NETWORK_CAMERA_ID)
             self.network_server.start()
             print("[GUI] Camera Server started - broadcasting to network")
             
