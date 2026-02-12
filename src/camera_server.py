@@ -159,8 +159,8 @@ class CameraServer:
             # Encode frame as JPEG if provided
             frame_jpeg = None
             if frame is not None:
-                # Compress to JPEG (quality 85 for balance)
-                success, jpeg_buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                # Compress to JPEG (quality 70 for faster encoding)
+                success, jpeg_buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
                 if success:
                     frame_jpeg = jpeg_buffer.tobytes()
             

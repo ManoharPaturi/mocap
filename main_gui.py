@@ -465,13 +465,20 @@ class MocapGUI:
                 except: pass
             # -------------------------
             
+            # --- DRAW VISUALIZATION FIRST (for network transmission) ---
+            if DRAW_LANDMARKS and results:
+                if 'pose' in results and results['pose']:
+                    frame = self.visualizer.draw(frame, results['pose'], results.get('face'), 
+                                                 results.get('left_hand'), results.get('right_hand'))
+            # -----------------------------------------------------------
+            
             # --- NETWORK BROADCASTING (Server Mode) ---
             if self.network_server:
-                # Broadcast detection results to network
+                # Broadcast detection results AND visualized frame to network
                 # Use wall-clock time (epoch nanoseconds) for cross-machine sync
                 timestamp = int(time.time() * 1e9)
                 self.network_server.send_frame_data(
-                    self.frame_count, timestamp, results, frame  # Include frame for remote display
+                    self.frame_count, timestamp, results, frame  # Now includes visualization!
                 )
                 # Debug only first 3 frames
                 if self.frame_count <= 3:
