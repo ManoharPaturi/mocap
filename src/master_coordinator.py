@@ -271,6 +271,10 @@ class MasterCoordinator:
                 print(f"[MasterCoordinator] Skipping invalid frame from {camera_id}")
             return
         
+        # Include frame_jpeg in results for decoding later
+        if 'frame_jpeg' in msg and msg['frame_jpeg']:
+            results['frame_jpeg'] = msg['frame_jpeg']
+        
         # Create FrameData object
         frame_data = FrameData(
             camera_id=camera_id,
@@ -286,7 +290,8 @@ class MasterCoordinator:
         
         # Debug only first 3 frames
         if self.stats['frames_received'][camera_id] <= 3:
-            print(f"[MasterCoordinator] Buffered frame {frame_number} from {camera_id}")
+            has_jpeg = 'frame_jpeg' in results
+            print(f"[MasterCoordinator] Buffered frame {frame_number} from {camera_id} (JPEG: {has_jpeg})")
     
     def get_synchronized_batch(self) -> Optional[List[FrameData]]:
         """
