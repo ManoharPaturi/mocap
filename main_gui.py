@@ -468,7 +468,8 @@ class MocapGUI:
             # --- NETWORK BROADCASTING (Server Mode) ---
             if self.network_server:
                 # Broadcast detection results to network
-                timestamp = time.perf_counter_ns()
+                # Use wall-clock time (epoch nanoseconds) for cross-machine sync
+                timestamp = int(time.time() * 1e9)
                 self.network_server.send_frame_data(
                     self.frame_count, timestamp, results
                 )
@@ -483,7 +484,8 @@ class MocapGUI:
                 # Master mode: Add our LOCAL camera to sync buffer too!
                 # The coordinator receives PC2's frames automatically,
                 # but we need to add PC1's local frames manually
-                timestamp = time.perf_counter_ns()
+                # Use wall-clock time (epoch nanoseconds) for cross-machine sync
+                timestamp = int(time.time() * 1e9)
                 
                 # Create a local frame data entry
                 from src.master_coordinator import FrameData
