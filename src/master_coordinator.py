@@ -264,7 +264,12 @@ class MasterCoordinator:
         timestamp = msg.get('timestamp')
         results = msg.get('results')
         
+        # Debug first 5 processed frames
+        if self.stats['frames_received'].get(camera_id, 0) < 5:
+            print(f"[_process_frame_data] cam={camera_id}, frame={frame_number}, ts={timestamp}, results={'yes' if results else 'NO'}")
+        
         if not all([camera_id, frame_number is not None, timestamp, results]):
+            print(f"[_process_frame_data] SKIPPING: cam={camera_id}, frame={frame_number}, ts={timestamp}, results={'yes' if results else 'NO'}")
             return
         
         # Create FrameData object
@@ -279,6 +284,10 @@ class MasterCoordinator:
         # Add to buffer
         self.frame_buffers[camera_id].append(frame_data)
         self.stats['frames_received'][camera_id] += 1
+        
+        # Debug
+        if self.stats['frames_received'][camera_id] <= 5:
+            print(f"[_process_frame_data] ✅ Added frame {frame_number} from {camera_id} to buffer (buffer size: {len(self.frame_buffers[camera_id])})")
     
     def get_synchronized_batch(self) -> Optional[List[FrameData]]:
         """
