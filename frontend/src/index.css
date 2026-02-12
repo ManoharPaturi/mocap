@@ -1,0 +1,8 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  background-color: #4B3621; /* Espresso */
+  color: #F5F5DC; /* Cream */
+}
