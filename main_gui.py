@@ -568,10 +568,16 @@ class MocapGUI:
                             except:
                                 pass
                 
-                # Check sync status (just for label color, doesn't block display)
-                synced = self.coordinator.get_synchronized_batch()
-                if synced and len(synced) >= 2:
+                # Check sync status and RUN 3D TRIANGULATION
+                synced_batch = self.coordinator.get_synchronized_batch()
+                if synced_batch and len(synced_batch) >= 2:
                     sync_label = "SYNCED ✓"
+                    
+                    # Compute 3D Pose
+                    pose_3d = self.coordinator.get_synced_3d_pose(synced_batch)
+                    if pose_3d:
+                        print(f"✅ 3D Pose Computed! {len(pose_3d['pose_3d'])} landmarks")
+                        # You can now save 'pose_3d' to CSV or visualize in 3D
                 
                 # Fallback to cached if no new frame decoded
                 if remote_frame is None and self.remote_frame is not None:

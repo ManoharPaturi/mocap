@@ -39,9 +39,39 @@ class StereoCalibration:
         )
         print("[StereoCalibration] Initialized")
     
-    def calibrate_intrinsic(
-        self,
-        camera_id: str,
+    def create_dummy_calibration(self, width=1280, height=720):
+        """
+        Create dummy calibration for testing without physical calibration.
+        Assumes two cameras side-by-side.
+        """
+        print("[StereoCalibration] Creating DUMMY calibration")
+        
+        # 1. Dummy Intrinsics (Same for both)
+        # Focal length approx 1000 for 720p is common
+        K = np.array([
+            [1000.0, 0.0, width/2],
+            [0.0, 1000.0, height/2],
+            [0.0, 0.0, 1.0]
+        ])
+        D = np.zeros(5) # No distortion
+        
+        cal1 = CameraCalibration("local_cam", K, D, image_size=(width, height))
+        cal2 = CameraCalibration("cam_0", K, D, image_size=(width, height))
+        
+        # 2. Dummy Extrinsics (Camera 1 at origin)
+        cal1.rotation = np.eye(3)
+        cal1.translation = np.zeros((3, 1))
+        
+        # Camera 2 is 1 meter to the right of Camera 1
+        cal2.rotation = np.eye(3) 
+        # T is position of world origin in Cam2 frame
+        # If Cam2 is at (1, 0, 0) relative to Cam1:
+        cal2.translation = np.array([[-1.0], [0.0], [0.0]]) 
+        
+        self.cameras["local_cam"] = cal1
+        self.cameras["cam_0"] = cal2
+        
+        return cal1, cal2
         images: List[np.ndarray],
         checkerboard_size: Tuple[int, int] = (9, 6),
         square_size: float = 0.025  # meters
@@ -347,7 +377,49 @@ class StereoCalibration:
         return P
 
 
+    def create_default_calibration(self, width: int = 1280, height: int = 720) -> None:
+        """
+        Create a default/approximate calibration for immediate use.
+        Assumes two cameras side-by-side, ~1 meter apart.
+        """
+        print("[StereoCalibration] Creating default calibration (Approximate)")
+        
+        # Approximate intrinsics for a standard webcam (FOV ~60 deg)
+        focal_length = width  # Rough estimate: fx = width
+        center_x = width / 2
+        center_y = height / 2
+        
+        K = np.array([
+            [focal_length, 0, center_x],
+            [0, focal_length, center_y],
+            [0, 0, 1]
+        ], dtype=np.float32)
+        
+        dist = np.zeros(5)  # Assume no distortion
+        
+        # Camera 1 (Origin)
+        self.cameras['local_cam'] = CameraCalibration(
+            camera_id='local_cam',
+            intrinsic_matrix=K,
+            distortion_coeffs=dist,
+            rotation=np.eye(3),
+            translation=np.zeros((3, 1)),
+            image_size=(width, height)
+        )
+        
+        # Camera 2 (Remote - PC2)
+        # Positioned 1.0 meter to the right of Camera 1
+        self.cameras['cam_0'] = CameraCalibration(
+            camera_id='cam_0',
+            intrinsic_matrix=K,
+            distortion_coeffs=dist,
+            rotation=np.eye(3),  # Facing same direction
+            translation=np.array([[-1.0], [0.0], [0.0]]),  # Translated -1m on X axis (relative to Cam1)
+            image_size=(width, height)
+        )
+        print("[StereoCalibration] Default calibration created (Baseline: 1.0m)")
+
 if __name__ == "__main__":
     print("Stereo Calibration Module - Test")
-    print("This module requires calibration images to run a full test.")
-    print("See calibration_wizard.py for interactive calibration tool.")
+    cal = StereoCalibration()
+    cal.create_default_calibration()

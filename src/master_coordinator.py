@@ -97,6 +97,22 @@ class MasterCoordinator:
         self.data_thread = Thread(target=self._data_receiver, daemon=True)
         self.data_thread.start()
         
+        # Initialize Triangulator with default calibration (if no file exists)
+        try:
+            # Try to load existing calibration
+            calibration = StereoCalibration()
+            try:
+                calibration.load_calibration(CALIBRATION_FILE)
+                print(f"[MasterCoordinator] Loaded calibration from {CALIBRATION_FILE}")
+            except (FileNotFoundError, Exception):
+                print("[MasterCoordinator] No calibration file found. Using DEFAULT calibration (1.0m baseline).")
+                calibration.create_default_calibration(width=1280, height=720)
+            
+            self.triangulator = Triangulator(calibration)
+        except Exception as e:
+            print(f"[MasterCoordinator] Failed to initialize triangulator: {e}")
+            self.triangulator = None
+        
         print(f"[MasterCoordinator] Started, listening for {self.num_cameras} cameras")
     
     def stop(self):
