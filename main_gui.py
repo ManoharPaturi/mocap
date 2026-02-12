@@ -476,14 +476,29 @@ class MocapGUI:
             
             # --- RECEIVE REMOTE CAMERA (Master Mode) ---
             if self.coordinator:
-                # Get synchronized batch from both cameras
-                synced_batch = self.coordinator.get_synchronized_batch()
-                if synced_batch and len(synced_batch) >= 1:
-                    # Remote camera data available
-                    remote_data = synced_batch[0]
-                    # TODO: Decode frame from remote_data.results
-                    # For now, just mark that we have remote data
-                    pass
+                # Master mode: Add our LOCAL camera to sync buffer too!
+                # The coordinator receives PC2's frames automatically,
+                # but we need to add PC1's local frames manually
+                timestamp = time.perf_counter_ns()
+                
+                # Create a local frame data entry
+                from src.master_coordinator import FrameData
+                local_frame_data = FrameData(
+                    camera_id='local_cam',
+                    frame_number=self.frame_count,
+                    timestamp=timestamp,
+                    results=results
+                )
+                
+                # Add to coordinator's buffer manually
+                if hasattr(self.coordinator, 'frame_buffer'):
+                    if 'local_cam' not in self.coordinator.frame_buffer:
+                        self.coordinator.frame_buffer['local_cam'] = []
+                    self.coordinator.frame_buffer['local_cam'].append(local_frame_data)
+                    
+                    # Keep buffer size reasonable
+                    if len(self.coordinator.frame_buffer['local_cam']) > 30:
+                        self.coordinator.frame_buffer['local_cam'].pop(0)
             # -----------------------------------------
             
             if self.is_recording:
@@ -511,31 +526,39 @@ class MocapGUI:
             
             # --- DUAL CAMERA DISPLAY (Master Mode) ---
             if MULTI_CAMERA_MODE == 'master' and self.coordinator:
-                # Get synchronized batch for remote camera
+                # Get synchronized batch (should have local + remote)
                 synced_batch = self.coordinator.get_synchronized_batch()
                 
-                if synced_batch and len(synced_batch) >= 1:
-                    # We have remote camera data
-                    remote_data = synced_batch[0]
+                if synced_batch and len(synced_batch) >= 2:
+                    # We have BOTH cameras synchronized!
+                    print(f"✅ Synced batch: {len(synced_batch)} cameras")
                     
-                    # Create placeholder for remote camera (black frame for now)
-                    # TODO: Decode actual frame from remote_data.results
-                    remote_frame = np.zeros_like(frame)
+                    # Separate local and remote
+                    local_frame_display = frame
+                    remote_frame = np.zeros_like(frame)  # Placeholder for now
                     
                     # Add text labels
-                    cv2.putText(frame, "Local Camera (PC1)", (10, 30),
+                    cv2.putText(local_frame_display, "Local Camera (PC1)", (10, 30),
                                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-                    cv2.putText(remote_frame, f"Remote Camera (PC2)", (10, 30),
+                    cv2.putText(remote_frame, f"Remote Camera (PC2) - {len(synced_batch)} cams", (10, 30),
                                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
                     
                     # Combine side-by-side
-                    combined_frame = np.hstack([frame, remote_frame])
+                    combined_frame = np.hstack([local_frame_display, remote_frame])
                     
                     # Mac: Skip OpenCV window (GUI works fine)
                     if platform.system() != 'Darwin':
                         cv2.imshow("Dual Camera View - Master", combined_frame)
+                        
+                elif synced_batch and len(synced_batch) == 1:
+                    # Only one camera in batch
+                    cv2.putText(frame, f"Waiting for 2nd camera... (have {len(synced_batch)})", (10, 30),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                    
+                    if platform.system() != 'Darwin':
+                        cv2.imshow("Dual Camera View - Master", frame)
                 else:
-                    # No remote data yet, show local only
+                    # No synchronized batch yet
                     cv2.putText(frame, "Local Camera - Waiting for Remote...", (10, 30),
                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
                     
