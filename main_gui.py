@@ -543,74 +543,67 @@ class MocapGUI:
             
             # --- DUAL CAMERA DISPLAY (Master Mode) ---
             if MULTI_CAMERA_MODE == 'master' and self.coordinator:
-                # Get synchronized batch (should have local + remote)
+                # Resize local frame
+                display_width, display_height = 640, 480
+                local_frame_display = cv2.resize(frame, (display_width, display_height))
+                
+                # Get most recent remote frame (don't wait for perfect sync)
+                remote_frame = None
+                sync_status = "WAITING"
+                
+                # Check if we have any remote frames in buffer
+                if 'cam_0' in self.coordinator.frame_buffers and len(self.coordinator.frame_buffers['cam_0']) > 0:
+                    # Get the most recent frame (last in buffer)
+                    latest_remote = self.coordinator.frame_buffers['cam_0'][-1]
+                    
+                    if 'frame_jpeg' in latest_remote.results and latest_remote.results['frame_jpeg']:
+                        try:
+                            jpg_bytes = latest_remote.results['frame_jpeg']
+                            jpg_np = np.frombuffer(jpg_bytes, dtype=np.uint8)
+                            decoded_frame = cv2.imdecode(jpg_np, cv2.IMREAD_COLOR)
+                            if decoded_frame is not None:
+                                remote_frame = cv2.resize(decoded_frame, (display_width, display_height))
+                                self.remote_frame = remote_frame  # Cache
+                                sync_status = "LIVE"
+                        except Exception as e:
+                            if self.frame_count <= 3:
+                                print(f"[ERROR] Decode failed: {e}")
+                
+                # Check if synced (just for status label)
                 synced_batch = self.coordinator.get_synchronized_batch()
-                
-                # Removed debug - only show sync success below
-                
                 if synced_batch and len(synced_batch) >= 2:
-                    # We have BOTH cameras synchronized!
-                    print(f"✅ Synced batch: {len(synced_batch)} cameras")
-                    
-                    # Resize local frame for better side-by-side view
-                    display_width, display_height = 640, 480
-                    local_frame_display = cv2.resize(frame, (display_width, display_height))
-                    
-                    # Decode remote camera frame from sync batch
-                    remote_frame = None
-                    for frame_data in synced_batch:
-                        if frame_data.camera_id != 'local_cam':
-                            # This is the remote camera
-                            if 'frame_jpeg' in frame_data.results and frame_data.results['frame_jpeg']:
-                                # Decode JPEG frame
-                                try:
-                                    jpg_bytes = frame_data.results['frame_jpeg']
-                                    jpg_np = np.frombuffer(jpg_bytes, dtype=np.uint8)
-                                    decoded_frame = cv2.imdecode(jpg_np, cv2.IMREAD_COLOR)
-                                    if decoded_frame is not None:
-                                        remote_frame = cv2.resize(decoded_frame, (display_width, display_height))
-                                        # Cache for next time in case of frame drop
-                                        self.remote_frame = remote_frame
-                                except Exception as e:
-                                    print(f"[ERROR] Failed to decode remote frame: {e}")
-                            break
-                    
-                    # Use cached frame if decode failed (smoother display)
-                    if remote_frame is None:
-                        if self.remote_frame is not None:
-                            remote_frame = self.remote_frame  # Use last good frame
-                        else:
-                            remote_frame = np.zeros((display_height, display_width, 3), dtype=np.uint8)
-                            cv2.putText(remote_frame, "No video data from PC2", (10, 60),
-                                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                    
-                    # Add text labels
-                    cv2.putText(local_frame_display, "Local Camera (PC1)", (10, 30),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                    cv2.putText(remote_frame, "Remote Camera (PC2)", (10, 30),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-                    
-                    # Combine side-by-side
-                    combined_frame = np.hstack([local_frame_display, remote_frame])
-                    
-                    # Mac: Skip OpenCV window (GUI works fine)
-                    if platform.system() != 'Darwin':
-                        cv2.imshow("Dual Camera View - Master", combined_frame)
-                        
-                elif synced_batch and len(synced_batch) == 1:
-                    # Only one camera in batch
-                    cv2.putText(frame, f"Waiting for 2nd camera... (have {len(synced_batch)})", (10, 30),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-                    
-                    if platform.system() != 'Darwin':
-                        cv2.imshow("Dual Camera View - Master", frame)
-                else:
-                    # No synchronized batch yet
-                    cv2.putText(frame, "Local Camera - Waiting for Remote...", (10, 30),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-                    
-                    if platform.system() != 'Darwin':
-                        cv2.imshow("Dual Camera View - Master", frame)
+                    sync_status = "SYNCED"
+                
+                # Use cached frame if no new frame
+                if remote_frame is None and self.remote_frame is not None:
+                    remote_frame = self.remote_frame
+                    sync_status = "CACHED"
+                
+                # Fallback to black if still nothing
+                if remote_frame is None:
+                    remote_frame = np.zeros((display_height, display_width, 3), dtype=np.uint8)
+                    sync_status = "NO DATA"
+                
+                # Add status labels with color based on sync
+                label_colors = {
+                    "SYNCED": (0, 255, 0),     # Green
+                    "LIVE": (0, 255, 255),     # Yellow
+                    "CACHED": (0, 165, 255),   # Orange
+                    "WAITING": (255, 255, 0),  # Cyan
+                    "NO DATA": (0, 0, 255)     # Red
+                }
+                
+                cv2.putText(local_frame_display, "Local Camera (PC1)", (10, 30),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                cv2.putText(remote_frame, f"Remote (PC2) - {sync_status}", (10, 30),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, label_colors[sync_status], 2)
+                
+                # Combine side-by-side
+                combined_frame = np.hstack([local_frame_display, remote_frame])
+                
+                # Display
+                if platform.system() != 'Darwin':
+                    cv2.imshow("Dual Camera View - Master", combined_frame)
             else:
                 # Single camera mode or server mode
                 # Mac: Skip OpenCV window (GUI dashboard works fine)
