@@ -166,7 +166,7 @@ DATA_PORT = 5001            # Port for frame data transmission
 NETWORK_PROTOCOL = 'tcp'     # 'udp' (faster) or 'tcp' (reliable)
 
 # Frame Synchronization
-SYNC_TIME_THRESHOLD_MS = 33.0  # Max time difference for frame matching (ms)
+SYNC_TIME_THRESHOLD_MS = 100.0  # Max time difference for frame matching (ms)
 FRAME_BUFFER_SIZE = 10         # Number of frames to buffer per camera
 
 # Calibration

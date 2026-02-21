@@ -15,6 +15,7 @@ from src.report_generator import ReportGenerator
 from src.pose_corrector import PoseCorrector
 from src.calculations import Calculations
 from config import DRAW_LANDMARKS, MULTI_CAMERA_MODE, REMOTE_CAMERA_IP
+import config
 
 # Multi-camera imports (conditional)
 if MULTI_CAMERA_MODE == 'server':
@@ -623,6 +624,19 @@ class MocapGUI:
                 
                 # Check sync status and RUN 3D TRIANGULATION
                 synced_batch = self.coordinator.get_synchronized_batch()
+                
+                # DEBUG SYNC FAILURE
+                if not synced_batch and self.frame_count % 30 == 0:
+                     if 'cam_0' in self.coordinator.frame_buffers and 'local_cam' in self.coordinator.frame_buffers:
+                         c0_buf = self.coordinator.frame_buffers['cam_0']
+                         lc_buf = self.coordinator.frame_buffers['local_cam']
+                         if len(c0_buf) > 0 and len(lc_buf) > 0:
+                             t_remote = c0_buf[-1].timestamp
+                             t_local = lc_buf[-1].timestamp
+                             diff_ms = abs(t_remote - t_local) / 1e6
+                             print(f"[Sync Debug] Latest Frame Delta: {diff_ms:.1f}ms (Threshold: {config.SYNC_TIME_THRESHOLD_MS}ms)")
+                             print(f"             Local: {t_local} vs Remote: {t_remote}")
+
                 if synced_batch and len(synced_batch) >= 2:
                     sync_label = "SYNCED ✓"
                     

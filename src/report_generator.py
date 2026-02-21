@@ -104,7 +104,7 @@ class ReportGenerator:
                 x.append(np.nan); y.append(np.nan); z.append(np.nan)
         
         # Fill missing
-        node_df = pd.DataFrame({'X': x, 'Y': y, 'Z': z}).fillna(method='ffill').fillna(0)
+        node_df = pd.DataFrame({'X': x, 'Y': y, 'Z': z}).ffill().fillna(0)
         
         # 1. Time Series Plot
         fig, axs = plt.subplots(2, 2, figsize=(15, 10))
@@ -136,8 +136,10 @@ class ReportGenerator:
         
         # Spectrogram (X)
         try:
-            axs[1,1].specgram(node_df['X'], Fs=30)
-            axs[1,1].set_title(f'{part_name} X Spectrogram')
+            nfft = min(256, len(node_df))
+            if nfft > 0:
+                axs[1,1].specgram(node_df['X'], NFFT=nfft, Fs=30)
+                axs[1,1].set_title(f'{part_name} X Spectrogram')
         except:
             pass
             
