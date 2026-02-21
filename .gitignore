@@ -22,11 +22,8 @@ Thumbs.db
 
 # Project specific
 mocap_data.db
-*.csv
-*.html
 results/
-dashboard_*.html
-viz_session_*.html
+output/
 
 # MediaPipe models already included
 # models/

@@ -72,16 +72,16 @@ python main_gui.py
 
 **Laptop 1 (Server)**:
 ```bash
-python test_multicam.py --mode server-detect
+python launch_multi_camera.py --mode server
 ```
 
 **Laptop 2 (Master)**:
 ```bash
 # Replace with Laptop 1's IP address
-python test_multicam.py --mode master --camera-ips 10.12.74.224
+python launch_multi_camera.py --mode master --remote-ip <SERVER_IP>
 ```
 
-See [quickstart.md](quickstart.md) for detailed multi-camera setup.
+See [SETUP.md](SETUP.md) for detailed multi-camera setup.
 
 ---
 
@@ -89,32 +89,48 @@ See [quickstart.md](quickstart.md) for detailed multi-camera setup.
 
 ```
 vs5/
-├── config.py              # Central configuration
-├── main.py               # CLI application
-├── main_gui.py           # Desktop GUI (Tkinter)
-├── server.py             # Web API (FastAPI)
-├── test_multicam.py      # Multi-camera testing
+├── config.py                  # Central configuration
+├── main_gui.py                # Desktop GUI (Tkinter)
+├── launch_multi_camera.py     # Multi-camera launcher
+├── requirements.txt
+├── SETUP.md                   # Multi-camera setup guide
 │
-├── src/                  # Core modules
-│   ├── camera.py         # Camera capture
-│   ├── detector.py       # MediaPipe detection
-│   ├── pose_corrector.py # Physics-based correction
-│   ├── calculations.py   # Biomechanical metrics
-│   ├── visualizer.py     # 2D rendering
-│   ├── visualizer_3d.py  # 3D Plotly visualization
-│   ├── database.py       # Session recording
-│   ├── report_generator.py # Automated reports
-│   │
-│   └── Multi-Camera Modules:
-│       ├── camera_server.py      # Network broadcaster
-│       ├── master_coordinator.py # Frame aggregator
-│       ├── frame_synchronizer.py # Timestamp matching
-│       ├── stereo_calibration.py # Camera calibration
-│       └── triangulation.py      # 3D reconstruction
+├── src/                       # Core modules
+│   ├── camera.py              # Camera capture
+│   ├── detector.py            # MediaPipe detection
+│   ├── pose_corrector.py      # Physics-based correction
+│   ├── calculations.py        # Biomechanical metrics
+│   ├── visualizer.py          # 2D rendering
+│   ├── visualizer_3d.py       # 3D Plotly visualization
+│   ├── live_visualizer_3d.py  # Real-time 3D display
+│   ├── database.py            # Session recording
+│   ├── report_generator.py    # Automated reports
+│   ├── streamer.py            # Video streaming
+│   ├── one_euro_filter.py     # Adaptive smoothing
+│   ├── camera_server.py       # Network broadcaster
+│   ├── master_coordinator.py  # Frame aggregator
+│   ├── frame_synchronizer.py  # Timestamp matching
+│   ├── stereo_calibration.py  # Camera calibration
+│   └── triangulation.py       # 3D reconstruction
 │
-├── models/               # MediaPipe models
-├── frontend/            # React web interface
-└── results/             # Generated reports
+├── scripts/                   # Helper scripts
+│   ├── run_gui.bat            # Launch single-camera GUI
+│   ├── run_master.bat         # Launch master mode
+│   └── allow_firewall.ps1     # Open network ports
+│
+├── tests/                     # Network & integration tests
+│   ├── test_connection.py
+│   ├── test_multicam.py
+│   ├── test_ports.py
+│   ├── test_remote_ports.py
+│   ├── test_receive_debug.py
+│   ├── test_sender.py
+│   └── test_sender_continuous.py
+│
+├── models/                    # MediaPipe model files
+├── frontend/                  # React web interface
+├── output/                    # Generated dashboards & exports
+└── results/                   # Generated report images
 ```
 
 ---
@@ -155,27 +171,8 @@ Features:
 - Session export
 - 3D visualization launcher
 
-### Web Interface
 
-```bash
-# Terminal 1: Backend
-python server.py
 
-# Terminal 2: Frontend
-cd frontend
-npm install
-npm run dev
-```
-
-Access at `http://localhost:5173`
-
-### CLI Mode
-
-```bash
-python main.py
-```
-
-Simple headless processing with OpenCV window.
 
 ---
 
@@ -198,10 +195,12 @@ CameraServer         →    FrameSynchronizer
 ### Setup Steps
 
 1. **Find IP Addresses**: Run `ipconfig` (Windows) or `ifconfig` (Mac/Linux)
-2. **Configure Cameras**: Edit `config.py` on each laptop
-3. **Run Server**: `python test_multicam.py --mode server-detect`
-4. **Run Master**: `python test_multicam.py --mode master --camera-ips <IP1> <IP2>`
-5. **Calibrate** (optional but recommended): Use checkerboard pattern for accurate 3D
+2. **Open Firewall**: Run `scripts\allow_firewall.ps1` as Admin on Server PC
+3. **Run Server**: `python launch_multi_camera.py --mode server`
+4. **Run Master**: `python launch_multi_camera.py --mode master --remote-ip <SERVER_IP>`
+5. **Calibrate** (optional): Use checkerboard pattern for accurate 3D
+
+> See [SETUP.md](SETUP.md) for full step-by-step instructions.
 
 ### Expected Improvements
 
@@ -263,10 +262,8 @@ See `implementation_plan.md` for architecture details.
 
 ## 📚 Documentation
 
-- **Repository Overview**: [repository_overview.md](repository_overview.md) - Full system documentation
-- **Quick Start**: [quickstart.md](quickstart.md) - Multi-camera setup guide
-- **Implementation Plan**: [implementation_plan.md](implementation_plan.md) - Multi-camera architecture
-- **Walkthrough**: [walkthrough.md](walkthrough.md) - Development walkthrough
+- **Setup Guide**: [SETUP.md](SETUP.md) - Detailed dual-PC setup instructions
+- **Configuration**: [config.py](config.py) - All tunable parameters
 
 ---
 
