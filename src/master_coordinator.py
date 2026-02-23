@@ -11,6 +11,7 @@ from typing import Dict, List, Optional, Any
 from threading import Thread, Event
 from collections import defaultdict, deque
 from dataclasses import dataclass
+import numpy as np
 from config import (
     DISCOVERY_PORT, DATA_PORT, NUM_CAMERAS, COMPRESS_NETWORK_DATA,
     FRAME_BUFFER_SIZE, SYNC_TIME_THRESHOLD_MS, CALIBRATION_FILE
@@ -274,7 +275,7 @@ class MasterCoordinator:
                         
                         # Deserialize
                         if COMPRESS_NETWORK_DATA:
-                            msg = msgpack.unpackb(data)
+                            msg = msgpack.unpackb(data, raw=False)
                         else:
                             msg = json.loads(data.decode('utf-8'))
                         

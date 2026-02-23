@@ -613,14 +613,19 @@ class MocapGUI:
                         # Decode JPEG
                         if 'frame_jpeg' in latest.results and latest.results['frame_jpeg']:
                             try:
-                                jpg_np = np.frombuffer(latest.results['frame_jpeg'], dtype=np.uint8)
+                                jpeg_bytes = bytes(latest.results['frame_jpeg'])
+                                jpg_np = np.frombuffer(jpeg_bytes, dtype=np.uint8)
                                 decoded = cv2.imdecode(jpg_np, cv2.IMREAD_COLOR)
                                 if decoded is not None:
                                     remote_frame = cv2.resize(decoded, (display_width, display_height))
                                     self.remote_frame = remote_frame  # Cache
                                     sync_label = "LIVE"
-                            except:
-                                pass
+                                else:
+                                    if self.frame_count % 60 == 0:
+                                        print("[Display] JPEG decode returned None")
+                            except Exception as e:
+                                if self.frame_count % 60 == 0:
+                                    print(f"[Display] JPEG decode error: {e}")
                 
                 # Check sync status and RUN 3D TRIANGULATION
                 synced_batch = self.coordinator.get_synchronized_batch()
