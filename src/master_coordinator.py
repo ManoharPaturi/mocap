@@ -239,10 +239,14 @@ class MasterCoordinator:
         """Connect to a camera's data stream."""
         try:
             socket = self.context.socket(zmq.SUB)
+            socket.setsockopt(zmq.RCVTIMEO, 1000)  # 1s receive timeout
+            socket.setsockopt(zmq.LINGER, 0)        # Don't block on close
             socket.connect(f"tcp://{ip}:{port}")
-            socket.setsockopt(zmq.SUBSCRIBE, b"")
+            socket.setsockopt(zmq.SUBSCRIBE, b"")  # Subscribe to all topics
+            # ZMQ slow joiner fix: give the SUB socket time to stabilize
+            time.sleep(0.5)
             self.data_sockets[camera_id] = socket
-            print(f"[MasterCoordinator] Connected to {camera_id} data stream")
+            print(f"[MasterCoordinator] Connected to {camera_id} data stream at {ip}:{port}")
         except Exception as e:
             print(f"[MasterCoordinator] Error connecting to {camera_id}: {e}")
     
@@ -250,18 +254,23 @@ class MasterCoordinator:
         """Receive frame data from all connected cameras."""
         print("[MasterCoordinator] Data receiver started")
         msg_count = 0
+        last_log_time = time.time()
         
         while self.running and not self.stop_event.is_set():
             try:
+                if not self.data_sockets:
+                    time.sleep(0.1)  # Wait until sockets are connected
+                    continue
+
                 # Poll all data sockets
                 for camera_id, socket in list(self.data_sockets.items()):
                     if socket.poll(timeout=10):
                         data = socket.recv()
                         msg_count += 1
                         
-                        # Debug only first 3 messages
-                        if msg_count <= 3:
-                            print(f"[MasterCoordinator] Receiving from {camera_id}")
+                        # Debug first 5 messages
+                        if msg_count <= 5:
+                            print(f"[MasterCoordinator] ✅ Receiving data from {camera_id} (msg #{msg_count})")
                         
                         # Deserialize
                         if COMPRESS_NETWORK_DATA:
@@ -272,9 +281,17 @@ class MasterCoordinator:
                         # Process frame data
                         if msg.get('type') == 'frame_data':
                             self._process_frame_data(msg)
+
+                # Periodic heartbeat log every 5 seconds
+                now = time.time()
+                if now - last_log_time >= 5.0:
+                    total = sum(self.stats['frames_received'].values())
+                    print(f"[MasterCoordinator] Heartbeat: {total} total frames received from {list(self.data_sockets.keys())}")
+                    last_log_time = now
                 
             except Exception as e:
-                print(f"[MasterCoordinator] Data receiver error: {e}")
+                if self.running:
+                    print(f"[MasterCoordinator] Data receiver error: {e}")
     
     def _process_frame_data(self, msg: Dict[str, Any]):
         """Process incoming frame data from a camera."""
