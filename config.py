@@ -161,8 +161,8 @@ REMOTE_CAMERA_IP = None  # IP of other laptop (e.g., '10.51.179.228')
 
 # Network Configuration
 MASTER_IP = '192.168.1.100'  # IP address of master coordinator
-DISCOVERY_PORT = 5000        # Port for camera discovery broadcasts
-DATA_PORT = 5001            # Port for frame data transmission
+DISCOVERY_PORT = 6000        # Port for camera discovery broadcasts
+DATA_PORT = 6001            # Port for frame data transmission
 NETWORK_PROTOCOL = 'tcp'     # 'udp' (faster) or 'tcp' (reliable)
 
 # Frame Synchronization
