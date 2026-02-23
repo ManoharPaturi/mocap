@@ -386,7 +386,58 @@ class MasterCoordinator:
             
         return None
 
-    def get_synced_3d_pose(self, synced_frames: List[FrameData]) -> Optional[Dict[str, Any]]:
+    def _extract_pose_landmarks(self, results: Dict[str, Any]) -> Optional[list]:
+        """
+        Normalize pose landmarks from either a raw MediaPipe result or a serialized dict.
+        
+        Local camera: results['pose'] is a PoseLandmarkerResult object
+        Remote camera: results['pose'] is a list of dicts or list of lists
+        
+        Returns: list of dicts with keys 'x', 'y', 'z', 'visibility', or None
+        """
+        pose = results.get('pose')
+        if not pose:
+            return None
+
+        # Case 1: Raw MediaPipe PoseLandmarkerResult object
+        # It has a .pose_landmarks attribute (list of lists of NormalizedLandmark)
+        if hasattr(pose, 'pose_landmarks'):
+            if pose.pose_landmarks and len(pose.pose_landmarks) > 0:
+                # pose_landmarks[0] = first detected person
+                return [
+                    {'x': lm.x, 'y': lm.y, 'z': lm.z, 'visibility': lm.visibility}
+                    for lm in pose.pose_landmarks[0]
+                ]
+            return None
+
+        # Case 2: Already-serialized list (from remote camera via network)
+        if isinstance(pose, list):
+            if len(pose) == 0:
+                return None
+            first = pose[0]
+            # Sub-case 2a: list of dicts (JSON deserialized)
+            if isinstance(first, dict):
+                return pose
+            # Sub-case 2b: list of lists [[x,y,z,vis], ...]
+            if isinstance(first, (list, tuple)):
+                return [
+                    {'x': lm[0], 'y': lm[1], 'z': lm[2], 'visibility': lm[3] if len(lm) > 3 else 1.0}
+                    for lm in pose
+                ]
+
+        # Also handle results['pose_landmarks'] key (alternative serialization)
+        pose_lms = results.get('pose_landmarks')
+        if pose_lms and isinstance(pose_lms, list) and len(pose_lms) > 0:
+            first = pose_lms[0]
+            if isinstance(first, dict):
+                return pose_lms
+            if isinstance(first, list) and len(first) > 0:
+                if isinstance(first[0], dict):
+                    return first  # pose_landmarks[0] = person 0's landmarks
+
+        return None
+
+    def get_synced_3d_pose(self, synced_frames: List['FrameData']) -> Optional[Dict[str, Any]]:
         """
         Compute 3D pose from a list of synchronized 2D frames.
         
@@ -400,29 +451,27 @@ class MasterCoordinator:
             return None
             
         # Collect 2D observations for each landmark
-        # Structure: {landmark_id: {'cam_id': (x, y), ...}}
         landmark_observations = defaultdict(dict)
         
         for frame in synced_frames:
-            if not frame.results or 'pose' not in frame.results or not frame.results['pose']:
+            landmarks = self._extract_pose_landmarks(frame.results)
+            if not landmarks:
                 continue
                 
-            # Iterate through all 33 pose landmarks
-            for idx, lm in enumerate(frame.results['pose']):
-                # In MediaPipe, x/y are normalized [0,1]. Convert to pixels.
-                # Use default 1280x720 if image size unknown
-                w, h = 1280, 720 
-                
-                # Check visibility
-                if lm.visibility > 0.5:
-                    x_px = lm.x * w
-                    y_px = lm.y * h
+            # Iterate through all pose landmarks
+            for idx, lm in enumerate(landmarks):
+                # lm is now always a dict
+                vis = lm.get('visibility', 1.0)
+                if vis > 0.5:
+                    w, h = 1280, 720
+                    x_px = lm['x'] * w
+                    y_px = lm['y'] * h
                     landmark_observations[idx][frame.camera_id] = np.array([x_px, y_px])
         
         # Triangulate each landmark
         landmarks_3d = {}
         for lm_id, observations in landmark_observations.items():
-            if len(observations) >= 2:  # Need at least 2 views
+            if len(observations) >= 2:
                 point_3d = self.triangulator.triangulate_point(observations)
                 if point_3d:
                     landmarks_3d[lm_id] = {
