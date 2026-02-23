@@ -5,7 +5,7 @@ Tests if PC2 can connect to PC1's ports
 
 import socket
 
-pc1_ip = "10.12.74.224"
+pc1_ip = "10.137.227.228"
 
 print(f"Testing connectivity to {pc1_ip}...")
 

@@ -109,10 +109,14 @@ class CameraServer:
         """Setup ZMQ sockets for discovery and data transmission."""
         # Discovery socket (TCP broadcast using PUB socket)
         self.discovery_socket = self.context.socket(zmq.PUB)
+        # Allow immediate rebinding even if port is in TIME_WAIT state
+        self.discovery_socket.setsockopt(zmq.LINGER, 0)
         self.discovery_socket.bind(f"tcp://*:{DISCOVERY_PORT}")
         
         # Data socket (PUB-SUB pattern)
         self.data_socket = self.context.socket(zmq.PUB)
+        # Allow immediate rebinding even if port is in TIME_WAIT state
+        self.data_socket.setsockopt(zmq.LINGER, 0)
         self.data_socket.bind(f"tcp://*:{DATA_PORT}")
     
     def _discovery_loop(self):
