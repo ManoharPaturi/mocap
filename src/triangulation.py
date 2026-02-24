@@ -7,10 +7,12 @@ import numpy as np
 import cv2
 from typing import List, Dict, Tuple, Optional
 from dataclasses import dataclass
+import torch
 from src.stereo_calibration import StereoCalibration, CameraCalibration
 from config import (
     TRIANGULATION_MIN_VIEWS, REPROJECTION_ERROR_THRESHOLD,
-    CONFIDENCE_WEIGHT_VISIBILITY, CONFIDENCE_WEIGHT_REPROJ
+    CONFIDENCE_WEIGHT_VISIBILITY, CONFIDENCE_WEIGHT_REPROJ,
+    CUDA_ENABLED, DEVICE
 )
 
 
@@ -55,6 +57,7 @@ class Triangulator:
     def triangulate_point(
         self,
         observations: Dict[str, np.ndarray],
+        visibility_weights: Dict[str, float] = None,
         undistort: bool = True
     ) -> Optional[Point3D]:
         """
@@ -62,6 +65,7 @@ class Triangulator:
         
         Args:
             observations: Dict mapping camera_id to 2D point (x, y)
+            visibility_weights: Weights per camera (for weighted DLT)
             undistort: Whether to undistort points before triangulation
             
         Returns:
@@ -93,8 +97,8 @@ class Triangulator:
         if len(projection_matrices) < TRIANGULATION_MIN_VIEWS:
             return None
         
-        # Triangulate using DLT
-        point_3d_homogeneous = self._triangulate_dlt(projection_matrices, points_2d)
+        # Triangulate using DLT (PyTorch CUDA accelerated if enabled)
+        point_3d_homogeneous = self._triangulate_dlt(projection_matrices, points_2d, visibility_weights, camera_ids)
         
         # Convert from homogeneous to 3D coordinates
         point_3d = point_3d_homogeneous[:3] / point_3d_homogeneous[3]
@@ -106,8 +110,8 @@ class Triangulator:
         
         # Calculate confidence
         confidence = self._calculate_confidence(
-            reproj_error,
-            visibility_scores=None,  # Will be provided by caller
+            reproj_error.item() if hasattr(reproj_error, 'item') else reproj_error,
+            visibility_scores=list(visibility_weights.values()) if visibility_weights else None,
             num_views=len(observations)
         )
         
@@ -119,8 +123,8 @@ class Triangulator:
             x=float(point_3d[0]),
             y=float(point_3d[1]),
             z=float(point_3d[2]),
-            confidence=confidence,
-            reprojection_error=reproj_error,
+            confidence=float(confidence),
+            reprojection_error=float(reproj_error),
             num_views=len(observations)
         )
     
@@ -190,33 +194,55 @@ class Triangulator:
     def _triangulate_dlt(
         self,
         projection_matrices: List[np.ndarray],
-        points_2d: List[np.ndarray]
+        points_2d: List[np.ndarray],
+        visibility_weights: Dict[str, float] = None,
+        camera_ids: List[str] = None
     ) -> np.ndarray:
-        """
-        Direct Linear Transform triangulation.
-        
-        Args:
-            projection_matrices: List of 3x4 projection matrices
-            points_2d: List of 2D points (x, y)
-            
-        Returns:
-            4D homogeneous point
-        """
+        """Direct Linear Transform triangulation with PyTorch acceleration."""
         num_views = len(projection_matrices)
-        A = np.zeros((2 * num_views, 4))
         
-        for i, (P, point) in enumerate(zip(projection_matrices, points_2d)):
-            x, y = point
+        if CUDA_ENABLED:
+            # Move data to GPU
+            P_torch = torch.tensor(np.stack(projection_matrices), dtype=torch.float32, device=DEVICE)
+            pts_torch = torch.tensor(np.stack(points_2d), dtype=torch.float32, device=DEVICE)
             
-            # Build system of equations
-            A[2*i] = x * P[2] - P[0]
-            A[2*i + 1] = y * P[2] - P[1]
-        
-        # Solve using SVD
-        _, _, Vt = np.linalg.svd(A)
-        X = Vt[-1]
-        
-        return X
+            # Build A matrix on GPU
+            # Each view gives 2 rows:
+            # x * P[2] - P[0]
+            # y * P[2] - P[1]
+            A = torch.zeros((2 * num_views, 4), device=DEVICE)
+            for i in range(num_views):
+                x, y = pts_torch[i]
+                P = P_torch[i]
+                
+                weight = 1.0
+                if visibility_weights and camera_ids:
+                    weight = visibility_weights.get(camera_ids[i], 1.0)
+                
+                A[2*i] = weight * (x * P[2] - P[0])
+                A[2*i + 1] = weight * (y * P[2] - P[1])
+            
+            # Solve using SVD on GPU
+            U, S, Vh = torch.linalg.svd(A)
+            X = Vh[-1]  # Last row of Vh corresponds to smallest singular value
+            
+            return X.detach().cpu().numpy()
+        else:
+            # Fallback to NumPy
+            A = np.zeros((2 * num_views, 4))
+            for i, (P, point) in enumerate(zip(projection_matrices, points_2d)):
+                x, y = point
+                
+                weight = 1.0
+                if visibility_weights and camera_ids:
+                    weight = visibility_weights.get(camera_ids[i], 1.0)
+                    
+                A[2*i] = weight * (x * P[2] - P[0])
+                A[2*i + 1] = weight * (y * P[2] - P[1])
+            
+            _, _, Vt = np.linalg.svd(A)
+            X = Vt[-1]
+            return X
     
     def _calculate_reprojection_error(
         self,
@@ -224,30 +250,28 @@ class Triangulator:
         projection_matrices: List[np.ndarray],
         points_2d: List[np.ndarray]
     ) -> float:
-        """
-        Calculate mean reprojection error across all views.
-        
-        Args:
-            point_3d: 3D point (x, y, z)
-            projection_matrices: List of projection matrices
-            points_2d: List of observed 2D points
+        """Calculate mean reprojection error with PyTorch acceleration."""
+        if CUDA_ENABLED:
+            point_3d_h = torch.tensor(np.append(point_3d, 1.0), dtype=torch.float32, device=DEVICE)
+            P_torch = torch.tensor(np.stack(projection_matrices), dtype=torch.float32, device=DEVICE)
+            pts_obs = torch.tensor(np.stack(points_2d), dtype=torch.float32, device=DEVICE)
             
-        Returns:
-            Mean reprojection error in pixels
-        """
-        errors = []
-        point_3d_h = np.append(point_3d, 1.0)  # Homogeneous coordinates
-        
-        for P, point_2d_observed in zip(projection_matrices, points_2d):
-            # Project 3D point to 2D
-            point_2d_projected_h = P @ point_3d_h
-            point_2d_projected = point_2d_projected_h[:2] / point_2d_projected_h[2]
+            # Project 3D points to 2D: [N, 3, 4] @ [4, 1] -> [N, 3, 1]
+            pts_proj_h = torch.matmul(P_torch, point_3d_h.unsqueeze(-1)).squeeze(-1)
+            pts_proj = pts_proj_h[:, :2] / pts_proj_h[:, 2:3]
             
-            # Calculate Euclidean distance
-            error = np.linalg.norm(point_2d_projected - point_2d_observed)
-            errors.append(error)
-        
-        return np.mean(errors)
+            # Distance error
+            errors = torch.norm(pts_proj - pts_obs, dim=1)
+            return torch.mean(errors).item()
+        else:
+            errors = []
+            point_3d_h = np.append(point_3d, 1.0)
+            for P, point_2d_observed in zip(projection_matrices, points_2d):
+                point_2d_projected_h = P @ point_3d_h
+                point_2d_projected = point_2d_projected_h[:2] / point_2d_projected_h[2]
+                error = np.linalg.norm(point_2d_projected - point_2d_observed)
+                errors.append(error)
+            return np.mean(errors)
     
     def _calculate_confidence(
         self,

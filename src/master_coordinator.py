@@ -11,9 +11,11 @@ from typing import Dict, List, Optional, Any
 from threading import Thread, Event
 from collections import defaultdict, deque
 from dataclasses import dataclass
+import numpy as np
 from config import (
     DISCOVERY_PORT, DATA_PORT, NUM_CAMERAS, COMPRESS_NETWORK_DATA,
-    FRAME_BUFFER_SIZE, SYNC_TIME_THRESHOLD_MS, CALIBRATION_FILE
+    FRAME_BUFFER_SIZE, SYNC_TIME_THRESHOLD_MS, CALIBRATION_FILE,
+    FEEDBACK_PORT, FEEDBACK_ENABLED, FEEDBACK_INTERVAL_FRAMES
 )
 from src.stereo_calibration import StereoCalibration
 from src.triangulation import Triangulator
@@ -77,6 +79,22 @@ class MasterCoordinator:
             'sync_failures': 0
         }
         
+        # Fusion modules (Level 1 & 2)
+        self.triangulator: Optional[Triangulator] = None
+        self._load_calibration()
+        
+        # Feedback Loop (Level 3)
+        self.feedback_socket = None
+        if FEEDBACK_ENABLED:
+            # We use the same self.context
+            self.feedback_socket = self.context.socket(zmq.PUB)
+            try:
+                self.feedback_socket.bind(f"tcp://*:{FEEDBACK_PORT}")
+                print(f"[MasterCoordinator] Feedback loop active on port {FEEDBACK_PORT}")
+            except Exception as e:
+                print(f"[MasterCoordinator] Could not bind feedback port: {e}")
+        
+        self.frame_count = 0
         print("[MasterCoordinator] Initialized")
     
     def start(self):
@@ -274,7 +292,7 @@ class MasterCoordinator:
                         
                         # Deserialize
                         if COMPRESS_NETWORK_DATA:
-                            msg = msgpack.unpackb(data)
+                            msg = msgpack.unpackb(data, raw=False)
                         else:
                             msg = json.loads(data.decode('utf-8'))
                         
@@ -386,56 +404,191 @@ class MasterCoordinator:
             
         return None
 
-    def get_synced_3d_pose(self, synced_frames: List[FrameData]) -> Optional[Dict[str, Any]]:
+    def _extract_pose_landmarks(self, results: Dict[str, Any]) -> Optional[list]:
+        """
+        Normalize pose landmarks from either a raw MediaPipe result or a serialized dict.
+        
+        Local camera: results['pose'] is a PoseLandmarkerResult object
+        Remote camera: results['pose'] is a list of dicts or list of lists
+        
+        Returns: list of dicts with keys 'x', 'y', 'z', 'visibility', or None
+        """
+        pose = results.get('pose')
+        if not pose:
+            return None
+
+        # Case 1: Raw MediaPipe PoseLandmarkerResult object
+        # It has a .pose_landmarks attribute (list of lists of NormalizedLandmark)
+        if hasattr(pose, 'pose_landmarks'):
+            if pose.pose_landmarks and len(pose.pose_landmarks) > 0:
+                # pose_landmarks[0] = first detected person
+                return [
+                    {'x': lm.x, 'y': lm.y, 'z': lm.z, 'visibility': lm.visibility}
+                    for lm in pose.pose_landmarks[0]
+                ]
+            return None
+
+        # Case 2: Already-serialized list (from remote camera via network)
+        if isinstance(pose, list):
+            if len(pose) == 0:
+                return None
+            first = pose[0]
+            # Sub-case 2a: list of dicts (JSON deserialized)
+            if isinstance(first, dict):
+                return pose
+            # Sub-case 2b: list of lists [[x,y,z,vis], ...]
+            if isinstance(first, (list, tuple)):
+                return [
+                    {'x': lm[0], 'y': lm[1], 'z': lm[2], 'visibility': lm[3] if len(lm) > 3 else 1.0}
+                    for lm in pose
+                ]
+
+        # Also handle results['pose_landmarks'] key (alternative serialization)
+        pose_lms = results.get('pose_landmarks')
+        if pose_lms and isinstance(pose_lms, list) and len(pose_lms) > 0:
+            first = pose_lms[0]
+            if isinstance(first, dict):
+                return pose_lms
+            if isinstance(first, list) and len(first) > 0:
+                if isinstance(first[0], dict):
+                    return first  # pose_landmarks[0] = person 0's landmarks
+
+        return None
+
+    def _get_monocular_fallback(self, lm: Dict[str, Any], camera_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Estimate 3D position from a single view (Level 1 Fallback).
+        Uses MediaPipe's relative 'z' and an assumed distance to subject.
+        """
+        if not self.triangulator or camera_id not in self.triangulator.calibration.cameras:
+            return None
+            
+        from config import MONOCULAR_SUBJECT_DISTANCE_M
+        
+        # Get camera parameters
+        cam = self.triangulator.calibration.cameras[camera_id]
+        fx = cam.intrinsic_matrix[0, 0]
+        fy = cam.intrinsic_matrix[1, 1]
+        cx = cam.intrinsic_matrix[0, 2]
+        cy = cam.intrinsic_matrix[1, 2]
+        
+        # 1. 2D Normalize -> Pixel -> Camera Space
+        # MediaPipe x,y are [0,1]. z is relative to hip (approx 0 centered)
+        x_px = lm['x'] * cam.image_size[0]
+        y_px = lm['y'] * cam.image_size[1]
+        
+        # Assumed depth: subject distance + MediaPipe's relative z
+        # MediaPipe z is scaled such that it's roughly in meters relative to hip
+        z_cam = MONOCULAR_SUBJECT_DISTANCE_M + lm.get('z', 0)
+        
+        # Back-project to 3D in camera space
+        x_cam = (x_px - cx) * z_cam / fx
+        y_cam = (y_px - cy) * z_cam / fy
+        
+        # Transform from camera space to world space: P_world = R.T @ (P_cam - T)
+        P_cam = np.array([[x_cam], [y_cam], [z_cam]])
+        P_world = cam.rotation.T @ (P_cam - cam.translation)
+        
+        return {
+            'x': float(P_world[0, 0]),
+            'y': float(P_world[1, 0]),
+            'z': float(P_world[2, 0]),
+            'visibility': lm.get('visibility', 0.5) * 0.7, # Lower confidence for fallback
+            'method': f'monocular_{camera_id}'
+        }
+
+    def get_synced_3d_pose(self, synced_frames: List['FrameData']) -> Optional[Dict[str, Any]]:
         """
         Compute 3D pose from a list of synchronized 2D frames.
-        
-        Args:
-            synced_frames: List of FrameData objects (must be synced)
-            
-        Returns:
-            Dictionary containing 3D landmarks if successful, None otherwise
+        Implements Level 1 (Occlusion Filling) and Level 2 (Weighted Triangulation).
         """
         if not self.triangulator:
             return None
             
+        from config import OCCLUSION_FILL_ENABLED
+            
         # Collect 2D observations for each landmark
-        # Structure: {landmark_id: {'cam_id': (x, y), ...}}
         landmark_observations = defaultdict(dict)
+        landmark_visibilities = defaultdict(dict)
+        landmark_raw_data = defaultdict(dict)
         
         for frame in synced_frames:
-            if not frame.results or 'pose' not in frame.results or not frame.results['pose']:
+            landmarks = self._extract_pose_landmarks(frame.results)
+            if not landmarks:
                 continue
                 
-            # Iterate through all 33 pose landmarks
-            for idx, lm in enumerate(frame.results['pose']):
-                # In MediaPipe, x/y are normalized [0,1]. Convert to pixels.
-                # Use default 1280x720 if image size unknown
-                w, h = 1280, 720 
-                
-                # Check visibility
-                if lm.visibility > 0.5:
-                    x_px = lm.x * w
-                    y_px = lm.y * h
+            for idx, lm in enumerate(landmarks):
+                vis = lm.get('visibility', 1.0)
+                landmark_raw_data[idx][frame.camera_id] = lm
+                if vis > 0.3: # Lower threshold to catch partially occluded
+                    w, h = 1280, 720
+                    x_px = lm['x'] * w
+                    y_px = lm['y'] * h
                     landmark_observations[idx][frame.camera_id] = np.array([x_px, y_px])
+                    landmark_visibilities[idx][frame.camera_id] = vis
+        
+        # Track quality for feedback loop
+        quality_feedback = {}
         
         # Triangulate each landmark
         landmarks_3d = {}
         for lm_id, observations in landmark_observations.items():
-            if len(observations) >= 2:  # Need at least 2 views
-                point_3d = self.triangulator.triangulate_point(observations)
+            # TIER 1: MULTI-VIEW TRIANGULATION (Level 2: Weighted)
+            if len(observations) >= 2:
+                point_3d = self.triangulator.triangulate_point(
+                    observations, 
+                    visibility_weights=landmark_visibilities[lm_id]
+                )
                 if point_3d:
                     landmarks_3d[lm_id] = {
                         'x': point_3d.x,
                         'y': point_3d.y,
                         'z': point_3d.z,
-                        'visibility': point_3d.confidence
+                        'visibility': point_3d.confidence,
+                        'method': 'triangulated',
+                        'views': point_3d.num_views,
+                        'reproj_error': point_3d.reprojection_error
                     }
-        
+                    
+                    # Store quality hint
+                    quality_feedback[lm_id] = point_3d.reprojection_error
+                    continue # Success
+            
+            # TIER 2: MONOCULAR FALLBACK (Level 1: Occlusion Filling)
+            if OCCLUSION_FILL_ENABLED and len(observations) >= 1:
+                # Pick the view with highest visibility
+                best_cam = max(landmark_visibilities[lm_id], key=landmark_visibilities[lm_id].get)
+                if landmark_visibilities[lm_id][best_cam] > 0.5:
+                    est_3d = self._get_monocular_fallback(landmark_raw_data[lm_id][best_cam], best_cam)
+                    if est_3d:
+                        landmarks_3d[lm_id] = est_3d
+
         if not landmarks_3d:
             return None
             
+        # Send feedback every N frames
+        self.frame_count += 1
+        if FEEDBACK_ENABLED and self.feedback_socket and self.frame_count % FEEDBACK_INTERVAL_FRAMES == 0:
+            self._send_quality_feedback(quality_feedback)
+            
         return {'pose_3d': landmarks_3d}
+
+    def _send_quality_feedback(self, quality_hints: Dict[int, float]):
+        """Broadcast quality metrics to all cameras."""
+        if not self.feedback_socket:
+            return
+            
+        msg = {
+            'type': 'quality_feedback',
+            'timestamp': time.time_ns(),
+            'hints': quality_hints # {lm_id: reproj_error}
+        }
+        
+        try:
+            payload = msgpack.packb(msg)
+            self.feedback_socket.send(payload)
+        except Exception as e:
+            print(f"[MasterCoordinator] Feedback send error: {e}")
     
     def discover_cameras(self, timeout: float = 5.0) -> List[CameraInfo]:
         """

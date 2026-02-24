@@ -13,7 +13,7 @@ from typing import Optional, Dict, Any
 from threading import Thread, Event
 from config import (
     CAMERA_ID, DISCOVERY_PORT, DATA_PORT, COMPRESS_NETWORK_DATA,
-    NETWORK_PROTOCOL
+    NETWORK_PROTOCOL, FEEDBACK_PORT, FEEDBACK_ENABLED, MASTER_IP
 )
 
 
@@ -49,6 +49,11 @@ class CameraServer:
         # Frame counter
         self.frame_count = 0
         
+        # Feedback Loop (Level 3)
+        self.feedback_socket = None
+        self.feedback_thread = None
+        self.quality_hints = {}
+        
         print(f"[CameraServer] Initialized with ID: {camera_id} on IP: {self.local_ip}")
     
     def _get_local_ip(self) -> str:
@@ -81,6 +86,11 @@ class CameraServer:
         self.discovery_thread = Thread(target=self._discovery_loop, daemon=True)
         self.discovery_thread.start()
         
+        # Start feedback loop if enabled
+        if FEEDBACK_ENABLED:
+            self.feedback_thread = Thread(target=self._feedback_loop, daemon=True)
+            self.feedback_thread.start()
+        
         print(f"[CameraServer] Started broadcasting on port {DISCOVERY_PORT}")
     
     def stop(self):
@@ -95,12 +105,16 @@ class CameraServer:
         # Wait for threads
         if self.discovery_thread:
             self.discovery_thread.join(timeout=2.0)
+        if self.feedback_thread:
+            self.feedback_thread.join(timeout=2.0)
         
         # Close sockets
         if self.discovery_socket:
             self.discovery_socket.close()
         if self.data_socket:
             self.data_socket.close()
+        if self.feedback_socket:
+            self.feedback_socket.close()
         
         self.context.term()
         print("[CameraServer] Stopped")
@@ -264,3 +278,50 @@ if __name__ == "__main__":
         pass
     finally:
         server.stop()
+    def _feedback_loop(self):
+        """Listen for quality feedback from the master (Level 3)."""
+        print("[CameraServer] Feedback thread started")
+        
+        # Initialize SUB socket
+        self.feedback_socket = self.context.socket(zmq.SUB)
+        self.feedback_socket.setsockopt(zmq.SUBSCRIBE, b"")
+        self.feedback_socket.setsockopt(zmq.RCVTIMEO, 1000) # 1s timeout
+        
+        # Connect to master
+        connected = False
+        while self.running and not self.stop_event.is_set():
+            target_ip = self.master_ip or MASTER_IP
+            if not target_ip:
+                time.sleep(1.0)
+                continue
+                
+            try:
+                self.feedback_socket.connect(f"tcp://{target_ip}:{FEEDBACK_PORT}")
+                print(f"[CameraServer] Subscribed to quality feedback from {target_ip}:{FEEDBACK_PORT}")
+                connected = True
+                break
+            except Exception as e:
+                time.sleep(2.0)
+        
+        if not connected: return
+        
+        while self.running and not self.stop_event.is_set():
+            try:
+                data = self.feedback_socket.recv()
+                msg = msgpack.unpackb(data, raw=False)
+                
+                if msg.get('type') == 'quality_feedback':
+                    hints = msg.get('hints', {})
+                    self.quality_hints = hints
+                    
+                    # LOGGING: Print summary if errors are unusually high
+                    high_err_count = sum(1 for err in hints.values() if err > 25.0)
+                    if high_err_count > 0 and self.frame_count % 300 == 0:
+                        print(f"[CameraServer] Master Feedback: {high_err_count} noisy joints detected")
+                        
+            except zmq.Again:
+                continue
+            except Exception as e:
+                if self.running:
+                    print(f"[CameraServer] Feedback loop error: {e}")
+                time.sleep(1.0)
