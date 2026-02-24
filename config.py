@@ -10,6 +10,12 @@ MIN_DETECTION_CONFIDENCE = 0.5
 MIN_TRACKING_CONFIDENCE = 0.5
 
 # Model Selection
+import torch
+
+# Global Hardware Acceleration
+CUDA_ENABLED = torch.cuda.is_available()
+DEVICE = "cuda" if CUDA_ENABLED else "cpu"
+
 # Options: 'LITE' (Fastest), 'FULL' (Balanced), 'HEAVY' (Most Accurate)
 POSE_MODEL_COMPLEXITY = 'FULL' 
 
@@ -166,7 +172,7 @@ DATA_PORT = 6001            # Port for frame data transmission
 NETWORK_PROTOCOL = 'tcp'     # 'udp' (faster) or 'tcp' (reliable)
 
 # Frame Synchronization
-SYNC_TIME_THRESHOLD_MS = 100.0  # Max time difference for frame matching (ms)
+SYNC_TIME_THRESHOLD_MS = 50.0  # Tightened for better accuracy with CUDA
 FRAME_BUFFER_SIZE = 10         # Number of frames to buffer per camera
 
 # Calibration
@@ -181,4 +187,11 @@ TRIANGULATION_MIN_VIEWS = 2      # Minimum cameras to see landmark for triangula
 REPROJECTION_ERROR_THRESHOLD = 15.0  # Max reprojection error (pixels)
 CONFIDENCE_WEIGHT_VISIBILITY = 0.6   # Weight for visibility in confidence calculation
 CONFIDENCE_WEIGHT_REPROJ = 0.4       # Weight for reprojection error in confidence
+OCCLUSION_FILL_ENABLED = True        # Use monocular fallback for occluded landmarks
+MONOCULAR_SUBJECT_DISTANCE_M = 2.5  # Approx distance for monocular fallback
+
+# Level 3 Feedback Loop
+FEEDBACK_PORT = 6002             # Port for quality feedback (Master -> Server)
+FEEDBACK_ENABLED = True         # Enable quality feedback loop
+FEEDBACK_INTERVAL_FRAMES = 10    # Send feedback every N frames
 

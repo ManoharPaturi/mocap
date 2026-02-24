@@ -3,9 +3,11 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import threading
 import time
-import numpy as np
 import platform
 import os
+import torch
+import torchvision.transforms.functional as TF
+from torchvision.io import decode_jpeg
 from src.camera import Camera
 from src.detector import MocapDetector
 from src.visualizer import Visualizer
@@ -14,14 +16,16 @@ from src.visualizer_3d import Visualizer3D
 from src.report_generator import ReportGenerator
 from src.pose_corrector import PoseCorrector
 from src.calculations import Calculations
-from config import DRAW_LANDMARKS, MULTI_CAMERA_MODE, REMOTE_CAMERA_IP
 import config
+from config import (
+    DRAW_LANDMARKS, MULTI_CAMERA_MODE, REMOTE_CAMERA_IP,
+    CUDA_ENABLED, DEVICE
+)
 
 # Multi-camera imports (conditional)
 if MULTI_CAMERA_MODE == 'server':
     from src.camera_server import CameraServer
 elif MULTI_CAMERA_MODE == 'master':
-    from src.master_coordinator import MasterCoordinator
     from src.master_coordinator import MasterCoordinator
     from src.triangulation import Triangulator
     from src.live_visualizer_3d import LiveVisualizer3D
@@ -598,39 +602,85 @@ class MocapGUI:
             # --- DUAL CAMERA DISPLAY (Master Mode) ---
             if MULTI_CAMERA_MODE == 'master' and self.coordinator:
                 display_width, display_height = 640, 480
-                
-                # ALWAYS DISPLAY: Grab freshest frames from buffers
-                local_frame_display = cv2.resize(frame, (display_width, display_height))
-                remote_frame = None
+                local_frame_gpu = None
+                remote_frame_gpu = None
                 sync_label = "WAITING"
-                
-                # Get newest remote frame if available (buffer[-1] = most recent)
+
+                # 1. Prepare Local Frame on GPU if CUDA enabled
+                if CUDA_ENABLED:
+                    try:
+                        # Convert BGR to RGB and to tensor [C, H, W]
+                        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        local_tensor = torch.from_numpy(rgb_frame).permute(2, 0, 1).to(DEVICE)
+                        local_frame_gpu = TF.resize(local_tensor, [display_height, display_width], antialias=True)
+                    except Exception as e:
+                        if self.frame_count % 100 == 0:
+                            print(f"[GPU] Local Resize Error: {e}")
+                        local_frame_display = cv2.resize(frame, (display_width, display_height))
+                else:
+                    local_frame_display = cv2.resize(frame, (display_width, display_height))
+
+                # 2. Prepare Remote Frame on GPU
                 if 'cam_0' in self.coordinator.frame_buffers:
                     buf = self.coordinator.frame_buffers['cam_0']
                     if len(buf) > 0:
-                        latest = buf[-1]  # Freshest frame, period.
-                        
-                        # Decode JPEG
+                        latest = buf[-1]
                         if 'frame_jpeg' in latest.results and latest.results['frame_jpeg']:
                             try:
-                                jpeg_bytes = bytes(latest.results['frame_jpeg'])
-                                jpg_np = np.frombuffer(jpeg_bytes, dtype=np.uint8)
-                                decoded = cv2.imdecode(jpg_np, cv2.IMREAD_COLOR)
-                                if decoded is not None:
-                                    remote_frame = cv2.resize(decoded, (display_width, display_height))
-                                    self.remote_frame = remote_frame  # Cache
+                                if CUDA_ENABLED:
+                                    # DECODE DIRECTLY ON GPU
+                                    jpeg_tensor = torch.from_numpy(np.frombuffer(latest.results['frame_jpeg'], dtype=np.uint8)).to(DEVICE)
+                                    # Torchvision decode returns [C, H, W]
+                                    decoded_gpu = decode_jpeg(jpeg_tensor, device=DEVICE)
+                                    remote_frame_gpu = TF.resize(decoded_gpu, [display_height, display_width], antialias=True)
                                     sync_label = "LIVE"
                                 else:
-                                    if self.frame_count % 60 == 0:
-                                        print("[Display] JPEG decode returned None")
+                                    # Fallback to CPU OpenCV
+                                    jpeg_bytes = bytes(latest.results['frame_jpeg'])
+                                    jpg_np = np.frombuffer(jpeg_bytes, dtype=np.uint8)
+                                    decoded = cv2.imdecode(jpg_np, cv2.IMREAD_COLOR)
+                                    if decoded is not None:
+                                        remote_frame = cv2.resize(decoded, (display_width, display_height))
+                                        self.remote_frame = remote_frame
+                                        sync_label = "LIVE"
                             except Exception as e:
-                                if self.frame_count % 60 == 0:
-                                    print(f"[Display] JPEG decode error: {e}")
+                                if self.frame_count % 100 == 0:
+                                    print(f"[GPU] Remote Decode/Resize Error: {e}")
+
+                # 3. Combine and Move to CPU for display
+                if CUDA_ENABLED and local_frame_gpu is not None:
+                    try:
+                        # Ensure we have a remote frame for side-by-side
+                        if remote_frame_gpu is None:
+                            remote_frame_gpu = torch.zeros_like(local_frame_gpu)
+                        
+                        # Stack horizontally [C, H, W1+W2]
+                        combined_gpu = torch.cat([local_frame_gpu, remote_frame_gpu], dim=2)
+                        
+                        # Move to CPU, permute back to [H, W, C], convert to BGR for OpenCV
+                        combined_cpu = combined_gpu.permute(1, 2, 0).cpu().numpy()
+                        combined_bgr = cv2.cvtColor(combined_cpu, cv2.COLOR_RGB2BGR)
+                        
+                        cv2.putText(combined_bgr, f"LOCAL ({sync_label})", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                        cv2.putText(combined_bgr, "REMOTE (MAC)", (display_width + 10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                        
+                        if platform.system() != 'Darwin':
+                            cv2.imshow("Dual Camera View - Master (GPU ACCEL)", combined_bgr)
+                    except Exception as e:
+                        if self.frame_count % 100 == 0:
+                            print(f"[GPU] Display Stack Error: {e}")
+                else:
+                    # CPU Fallback Side-by-Side
+                    if remote_frame is None:
+                        remote_frame = np.zeros((display_height, display_width, 3), dtype=np.uint8)
+                    combined = np.hstack([local_frame_display, remote_frame])
+                    cv2.imshow("Dual Camera View - Master (CPU)", combined)
                 
+                # --- DISPLAY SYNC STATUS & 3D CALC ---
                 # Check sync status and RUN 3D TRIANGULATION
                 synced_batch = self.coordinator.get_synchronized_batch()
                 
-                # DEBUG SYNC FAILURE
+                # DEBUG SYNC FAILURE (Conditional print)
                 if not synced_batch and self.frame_count % 30 == 0:
                      if 'cam_0' in self.coordinator.frame_buffers and 'local_cam' in self.coordinator.frame_buffers:
                          c0_buf = self.coordinator.frame_buffers['cam_0']
@@ -640,7 +690,6 @@ class MocapGUI:
                              t_local = lc_buf[-1].timestamp
                              diff_ms = abs(t_remote - t_local) / 1e6
                              print(f"[Sync Debug] Latest Frame Delta: {diff_ms:.1f}ms (Threshold: {config.SYNC_TIME_THRESHOLD_MS}ms)")
-                             print(f"             Local: {t_local} vs Remote: {t_remote}")
 
                 if synced_batch and len(synced_batch) >= 2:
                     sync_label = "SYNCED ✓"
@@ -650,53 +699,19 @@ class MocapGUI:
                     
                     # SAVE SYNCHRONIZED DATA (Master Mode Recording)
                     if self.is_recording:
-                         # Extract results for PC1 (local) and PC2 (remote)
-                         pc1_res = None
-                         pc2_res = None
-                         for f in synced_batch:
-                              if f.camera_id == 'local_cam': pc1_res = f.results
-                              elif f.camera_id == 'cam_0': pc2_res = f.results
-                         
+                         pc1_res = next((f.results for f in synced_batch if f.camera_id == 'local_cam'), None)
+                         pc2_res = next((f.results for f in synced_batch if f.camera_id == 'cam_0'), None)
                          self.db.save_synced_frame(time.time(), pc1_res, pc2_res, pose_3d)
 
                     if pose_3d:
-                        print(f"✅ 3D Pose Computed! {len(pose_3d.get('pose_3d',[]))} landmarks")
-                        # Update Live 3D View (Main Thread Call not strictly needed for MPL interactive mode if careful)
+                        if self.frame_count % 100 == 0:
+                            print(f"✅ 3D Pose Computed! {len(pose_3d.get('pose_3d',[]))} landmarks")
                         if self.live_viz and self.live_viz.initialized:
-                             # MPL is not thread safe, but ion() + pause() sometimes works. 
-                             # Safest is to schedule it? No, pause() blocks.
-                             # Let's try direct update first, if it crashes we wrap in after()
-                             try:
-                                 self.live_viz.update(pose_3d)
+                             try: self.live_viz.update(pose_3d)
                              except: pass
-                
-                # Fallback to cached if no new frame decoded
-                if remote_frame is None and self.remote_frame is not None:
-                    remote_frame = self.remote_frame
-                    sync_label = "CACHED"
-                elif remote_frame is None:
-                    # No data at all yet
-                    remote_frame = np.zeros((display_height, display_width, 3), dtype=np.uint8)
-                    sync_label = "NO DATA"
-                
-                # Labels with color coding
-                colors = {
-                    "SYNCED ✓": (0, 255, 0),
-                    "LIVE": (0, 255, 255), 
-                    "CACHED": (0, 165, 255),
-                    "WAITING": (255, 255, 0),
-                    "NO DATA": (0, 0, 255)
-                }
-                
-                cv2.putText(local_frame_display, "Local (PC1)", (10, 30),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                cv2.putText(remote_frame, f"Remote (PC2) {sync_label}", (10, 30),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, colors[sync_label], 2)
-                
-                # Display side-by-side - ALWAYS, every frame
-                combined = np.hstack([local_frame_display, remote_frame])
-                if platform.system() != 'Darwin':
-                    cv2.imshow("Dual Camera View - Master", combined)
+
+                # FINAL GPU DISPLAY (or CPU Fallback defined earlier)
+                # Note: Labels are already applied in the GPU/CPU blocks above
             else:
                 # Single camera mode or server mode
                 # Mac: Skip OpenCV window (GUI dashboard works fine)
