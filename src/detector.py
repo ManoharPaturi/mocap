@@ -2,6 +2,7 @@ import mediapipe as mp
 import cv2
 import time
 import numpy as np
+import platform
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 from config import (
@@ -12,7 +13,8 @@ from config import (
     FACE_EXPOSURE_MIN_BRIGHTNESS, CLAHE_CLIP_LIMIT, CLAHE_TILE_GRID_SIZE,
     ENABLE_FACE_DETECTION, ENABLE_HAND_DETECTION, ENABLE_FACE_EXPOSURE,
     ENABLE_ROI_CROPPING, ROI_EXPANSION_FACTOR, ROI_MIN_SIZE,
-    ROI_TARGET_SIZE, ROI_SMOOTHING_ALPHA
+    ROI_TARGET_SIZE, ROI_SMOOTHING_ALPHA, PREFER_GPU_DELEGATE,
+    INFERENCE_BACKEND
 )
 
 class MocapDetector:
@@ -38,41 +40,111 @@ class MocapDetector:
         pose_model_path = MODEL_PATHS.get(POSE_MODEL_COMPLEXITY, MODEL_PATHS['LITE'])
         print(f"Loading Pose Model: {POSE_MODEL_COMPLEXITY} ({pose_model_path})")
 
+        self.use_gpu_delegate = self._should_use_gpu_delegate()
+        if self.use_gpu_delegate:
+            print("[Detector] Using MediaPipe GPU delegate (Metal on macOS)")
+        else:
+            print("[Detector] Using CPU delegate")
+
         # 1. Pose Landmarker
-        pose_base_opts = python.BaseOptions(model_asset_path=pose_model_path)
-        pose_opts = vision.PoseLandmarkerOptions(
-            base_options=pose_base_opts,
-            running_mode=vision.RunningMode.VIDEO,
-            num_poses=NUM_POSES,
-            min_pose_detection_confidence=MIN_DETECTION_CONFIDENCE,
-            min_pose_presence_confidence=MIN_TRACKING_CONFIDENCE,
-            min_tracking_confidence=MIN_TRACKING_CONFIDENCE
-        )
-        self.pose_landmarker = vision.PoseLandmarker.create_from_options(pose_opts)
+        self.pose_landmarker = self._build_pose_landmarker(pose_model_path)
 
         # 2. Face Landmarker
-        face_base_opts = python.BaseOptions(model_asset_path=MODEL_PATHS['FACE'])
-        face_opts = vision.FaceLandmarkerOptions(
-            base_options=face_base_opts,
-            running_mode=vision.RunningMode.VIDEO,
-            num_faces=NUM_FACES,
-            min_face_detection_confidence=MIN_DETECTION_CONFIDENCE,
-            min_face_presence_confidence=MIN_TRACKING_CONFIDENCE,
-            min_tracking_confidence=MIN_TRACKING_CONFIDENCE
-        )
-        self.face_landmarker = vision.FaceLandmarker.create_from_options(face_opts)
+        self.face_landmarker = self._build_face_landmarker(MODEL_PATHS['FACE'])
 
         # 3. Hand Landmarker
-        hand_base_opts = python.BaseOptions(model_asset_path=MODEL_PATHS['HAND'])
-        hand_opts = vision.HandLandmarkerOptions(
-            base_options=hand_base_opts,
-            running_mode=vision.RunningMode.VIDEO,
-            num_hands=NUM_HANDS,
-            min_hand_detection_confidence=MIN_DETECTION_CONFIDENCE,
-            min_hand_presence_confidence=MIN_TRACKING_CONFIDENCE,
-            min_tracking_confidence=MIN_TRACKING_CONFIDENCE
-        )
-        self.hand_landmarker = vision.HandLandmarker.create_from_options(hand_opts)
+        self.hand_landmarker = self._build_hand_landmarker(MODEL_PATHS['HAND'])
+
+    def _should_use_gpu_delegate(self):
+        backend = str(INFERENCE_BACKEND).strip().lower()
+
+        if backend == 'cpu':
+            return False
+
+        if backend == 'mps':
+            if platform.system() == 'Darwin':
+                return True
+            print("[Detector] INFERENCE_BACKEND='mps' requested on non-macOS. Falling back to CPU")
+            return False
+
+        if backend == 'gpu':
+            return platform.system() == 'Darwin'
+
+        if backend == 'auto':
+            return bool(PREFER_GPU_DELEGATE and platform.system() == 'Darwin')
+
+        print(f"[Detector] Unknown INFERENCE_BACKEND='{INFERENCE_BACKEND}'. Using auto mode")
+        return bool(PREFER_GPU_DELEGATE and platform.system() == 'Darwin')
+
+    def _create_base_options(self, model_path):
+        if self.use_gpu_delegate:
+            try:
+                return python.BaseOptions(
+                    model_asset_path=model_path,
+                    delegate=python.BaseOptions.Delegate.GPU
+                )
+            except Exception as error:
+                print(f"[Detector] GPU delegate unavailable ({error}), falling back to CPU")
+                self.use_gpu_delegate = False
+
+        return python.BaseOptions(model_asset_path=model_path)
+
+    def _build_pose_landmarker(self, model_path):
+        try:
+            base_opts = self._create_base_options(model_path)
+            pose_opts = vision.PoseLandmarkerOptions(
+                base_options=base_opts,
+                running_mode=vision.RunningMode.VIDEO,
+                num_poses=NUM_POSES,
+                min_pose_detection_confidence=MIN_DETECTION_CONFIDENCE,
+                min_pose_presence_confidence=MIN_TRACKING_CONFIDENCE,
+                min_tracking_confidence=MIN_TRACKING_CONFIDENCE
+            )
+            return vision.PoseLandmarker.create_from_options(pose_opts)
+        except Exception as error:
+            if self.use_gpu_delegate:
+                print(f"[Detector] Pose GPU init failed ({error}), retrying on CPU")
+                self.use_gpu_delegate = False
+                return self._build_pose_landmarker(model_path)
+            raise
+
+    def _build_face_landmarker(self, model_path):
+        try:
+            base_opts = self._create_base_options(model_path)
+            face_opts = vision.FaceLandmarkerOptions(
+                base_options=base_opts,
+                running_mode=vision.RunningMode.VIDEO,
+                num_faces=NUM_FACES,
+                min_face_detection_confidence=MIN_DETECTION_CONFIDENCE,
+                min_face_presence_confidence=MIN_TRACKING_CONFIDENCE,
+                min_tracking_confidence=MIN_TRACKING_CONFIDENCE
+            )
+            return vision.FaceLandmarker.create_from_options(face_opts)
+        except Exception as error:
+            if self.use_gpu_delegate:
+                print(f"[Detector] Face GPU init failed ({error}), retrying on CPU")
+                self.use_gpu_delegate = False
+                return self._build_face_landmarker(model_path)
+            raise
+
+    def _build_hand_landmarker(self, model_path):
+        try:
+            base_opts = self._create_base_options(model_path)
+            hand_opts = vision.HandLandmarkerOptions(
+                base_options=base_opts,
+                running_mode=vision.RunningMode.VIDEO,
+                num_hands=NUM_HANDS,
+                min_hand_detection_confidence=MIN_DETECTION_CONFIDENCE,
+                min_hand_presence_confidence=MIN_TRACKING_CONFIDENCE,
+                min_tracking_confidence=MIN_TRACKING_CONFIDENCE
+            )
+            return vision.HandLandmarker.create_from_options(hand_opts)
+        except Exception as error:
+            if self.use_gpu_delegate:
+                print(f"[Detector] Hand GPU init failed ({error}), retrying on CPU")
+                self.use_gpu_delegate = False
+                return self._build_hand_landmarker(model_path)
+            raise
         
     def reload(self, model_type="FULL"):
         """Reload Pose Model with specific complexity (LITE, FULL, HEAVY)."""
@@ -85,16 +157,7 @@ class MocapDetector:
             self.pose_landmarker.close()
             
         pose_model_path = MODEL_PATHS[model_type]
-        base_opts = python.BaseOptions(model_asset_path=pose_model_path)
-        opts = vision.PoseLandmarkerOptions(
-            base_options=base_opts,
-            running_mode=vision.RunningMode.VIDEO,
-            num_poses=NUM_POSES,
-            min_pose_detection_confidence=MIN_DETECTION_CONFIDENCE,
-            min_pose_presence_confidence=MIN_TRACKING_CONFIDENCE,
-            min_tracking_confidence=MIN_TRACKING_CONFIDENCE
-        )
-        self.pose_landmarker = vision.PoseLandmarker.create_from_options(opts)
+        self.pose_landmarker = self._build_pose_landmarker(pose_model_path)
         
     def set_imaging_params(self, gamma=1.0, face_exposure=False, enable_face=True, enable_hand=True, enable_roi=None):
         """Update runtime imaging parameters."""
@@ -229,9 +292,14 @@ class MocapDetector:
         
         # ---------------------
         
-        # Convert to RGB (MediaPipe Image)
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
+        # Convert frame for MediaPipe Image
+        if self.use_gpu_delegate:
+            # GPU path on macOS is more stable with SRGBA input
+            frame_rgba = cv2.cvtColor(frame, cv2.COLOR_BGR2RGBA)
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGBA, data=frame_rgba)
+        else:
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
         
         # Calculate Timestamp in Milliseconds
         timestamp_ms = int(time.time() * 1000)

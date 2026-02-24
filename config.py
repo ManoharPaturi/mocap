@@ -114,6 +114,12 @@ ROI_SMOOTHING_ALPHA = 0.7           # Smooth ROI position (0.5-0.8)
 # Frame Skip (for low-end hardware)
 FRAME_SKIP = 0  # Process every Nth frame (0 = no skip, 1 = every other frame)
 
+# Inference Acceleration
+# Backends: 'mps' (macOS Metal via MediaPipe GPU delegate), 'gpu', 'cpu', 'auto'
+INFERENCE_BACKEND = 'mps'
+# Backward-compat toggle used by older code paths (kept for compatibility)
+PREFER_GPU_DELEGATE = True
+
 # --- Presets ---
 # You can define presets for different scenarios
 PRESETS = {
