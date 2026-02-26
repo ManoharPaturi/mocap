@@ -40,7 +40,13 @@ try:
     print(f"\n{'='*60}")
     print(f"VS5 Motion Capture System")
     print(f"Mode: {args.mode.upper()}")
-    print(f"Hardware Acceleration: {'CUDA (RTX 2050)' if config.CUDA_ENABLED else 'CPU'}")
+    if config.CUDA_ENABLED:
+        accel_str = 'CUDA'
+    elif config.MPS_ENABLED:
+        accel_str = 'Metal (MPS)'
+    else:
+        accel_str = 'CPU'
+    print(f"Hardware Acceleration: {accel_str}")
     if args.mode == 'master':
         print(f"Remote Camera: {config.REMOTE_CAMERA_IP}")
     print(f"{'='*60}\n")

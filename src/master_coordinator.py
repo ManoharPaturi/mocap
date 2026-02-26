@@ -96,7 +96,22 @@ class MasterCoordinator:
         
         self.frame_count = 0
         print("[MasterCoordinator] Initialized")
-    
+
+    def _load_calibration(self):
+        """Load stereo calibration file and initialize triangulator."""
+        try:
+            calibration = StereoCalibration()
+            try:
+                calibration.load_calibration(CALIBRATION_FILE)
+                print(f"[MasterCoordinator] Loaded calibration from {CALIBRATION_FILE}")
+            except (FileNotFoundError, Exception):
+                print("[MasterCoordinator] No calibration file found. Using DEFAULT calibration (1.0m baseline).")
+                calibration.create_default_calibration(width=1280, height=720)
+            self.triangulator = Triangulator(calibration)
+        except Exception as e:
+            print(f"[MasterCoordinator] Failed to initialize triangulator: {e}")
+            self.triangulator = None
+
     def start(self):
         """Start the master coordinator."""
         if self.running:
@@ -116,22 +131,6 @@ class MasterCoordinator:
         # Start data receiver thread
         self.data_thread = Thread(target=self._data_receiver, daemon=True)
         self.data_thread.start()
-        
-        # Initialize Triangulator with default calibration (if no file exists)
-        try:
-            # Try to load existing calibration
-            calibration = StereoCalibration()
-            try:
-                calibration.load_calibration(CALIBRATION_FILE)
-                print(f"[MasterCoordinator] Loaded calibration from {CALIBRATION_FILE}")
-            except (FileNotFoundError, Exception):
-                print("[MasterCoordinator] No calibration file found. Using DEFAULT calibration (1.0m baseline).")
-                calibration.create_default_calibration(width=1280, height=720)
-            
-            self.triangulator = Triangulator(calibration)
-        except Exception as e:
-            print(f"[MasterCoordinator] Failed to initialize triangulator: {e}")
-            self.triangulator = None
         
         print(f"[MasterCoordinator] Started, listening for {self.num_cameras} cameras")
     
@@ -259,6 +258,8 @@ class MasterCoordinator:
             socket = self.context.socket(zmq.SUB)
             socket.setsockopt(zmq.RCVTIMEO, 1000)  # 1s receive timeout
             socket.setsockopt(zmq.LINGER, 0)        # Don't block on close
+            socket.setsockopt(zmq.RCVHWM, 1)
+            socket.setsockopt(zmq.CONFLATE, 1)
             socket.connect(f"tcp://{ip}:{port}")
             socket.setsockopt(zmq.SUBSCRIBE, b"")  # Subscribe to all topics
             # ZMQ slow joiner fix: give the SUB socket time to stabilize
@@ -282,20 +283,25 @@ class MasterCoordinator:
 
                 # Poll all data sockets
                 for camera_id, socket in list(self.data_sockets.items()):
-                    if socket.poll(timeout=10):
-                        data = socket.recv()
+                    latest_data = None
+                    if socket.poll(timeout=2):
+                        latest_data = socket.recv()
+                        while socket.poll(timeout=0):
+                            latest_data = socket.recv()
+
+                    if latest_data is not None:
                         msg_count += 1
-                        
+
                         # Debug first 5 messages
                         if msg_count <= 5:
                             print(f"[MasterCoordinator] ✅ Receiving data from {camera_id} (msg #{msg_count})")
-                        
+
                         # Deserialize
                         if COMPRESS_NETWORK_DATA:
-                            msg = msgpack.unpackb(data, raw=False)
+                            msg = msgpack.unpackb(latest_data, raw=False)
                         else:
-                            msg = json.loads(data.decode('utf-8'))
-                        
+                            msg = json.loads(latest_data.decode('utf-8'))
+
                         # Process frame data
                         if msg.get('type') == 'frame_data':
                             self._process_frame_data(msg)
@@ -306,6 +312,8 @@ class MasterCoordinator:
                     total = sum(self.stats['frames_received'].values())
                     print(f"[MasterCoordinator] Heartbeat: {total} total frames received from {list(self.data_sockets.keys())}")
                     last_log_time = now
+
+                time.sleep(0.001)
                 
             except Exception as e:
                 if self.running:

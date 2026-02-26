@@ -10,19 +10,31 @@ MIN_DETECTION_CONFIDENCE = 0.5
 MIN_TRACKING_CONFIDENCE = 0.5
 
 # Model Selection
-import torch
-
-# Global Hardware Acceleration
-CUDA_ENABLED = torch.cuda.is_available()
-DEVICE = "cuda" if CUDA_ENABLED else "cpu"
+try:
+    import torch
+    TORCH_AVAILABLE = True
+    MPS_ENABLED = bool(getattr(torch.backends, 'mps', None) and torch.backends.mps.is_available())
+    CUDA_ENABLED = torch.cuda.is_available()
+    if MPS_ENABLED:
+        DEVICE = "mps"
+    elif CUDA_ENABLED:
+        DEVICE = "cuda"
+    else:
+        DEVICE = "cpu"
+except Exception:
+    TORCH_AVAILABLE = False
+    MPS_ENABLED = False
+    CUDA_ENABLED = False
+    DEVICE = "cpu"
 
 # Options: 'LITE' (Fastest), 'FULL' (Balanced), 'HEAVY' (Most Accurate)
 POSE_MODEL_COMPLEXITY = 'FULL' 
 
-# Multi-Person Settings
-NUM_POSES = 5
-NUM_FACES = 5
-NUM_HANDS = 5
+# Multi-Person Settings (set to 1 for single-person use — each additional
+# slot multiplies MediaPipe's internal memory allocation for all 3 models)
+NUM_POSES = 1
+NUM_FACES = 1
+NUM_HANDS = 2  # 2 hands per person
 
 # Internal Paths (Do not edit unless moving files)
 MODEL_PATHS = {
@@ -172,14 +184,17 @@ MULTI_CAMERA_MODE = 'single'
 REMOTE_CAMERA_IP = None  # IP of other laptop (e.g., '10.51.179.228')
 
 # Network Configuration
-MASTER_IP = '192.168.1.100'  # IP address of master coordinator
+MASTER_IP = '10.137.227.228'  # IP address of master coordinator
 DISCOVERY_PORT = 6000        # Port for camera discovery broadcasts
 DATA_PORT = 6001             # Port for frame data transmission
 NETWORK_PROTOCOL = 'tcp'     # 'udp' (faster) or 'tcp' (reliable)
+NETWORK_JPEG_QUALITY = 35    # Lower = smaller/faster network frames
+NETWORK_STREAM_WIDTH = 640   # Remote stream width for transmission only
+NETWORK_STREAM_HEIGHT = 360  # Remote stream height for transmission only
 
 # Frame Synchronization
 SYNC_TIME_THRESHOLD_MS = 50.0  # Tightened for better accuracy with CUDA
-FRAME_BUFFER_SIZE = 10         # Number of frames to buffer per camera
+FRAME_BUFFER_SIZE = 1          # Latest-frame mode: keep only newest frame per camera
 
 # Calibration
 CALIBRATION_FILE = 'calibration.json'

@@ -13,7 +13,8 @@ from typing import Optional, Dict, Any
 from threading import Thread, Event
 from config import (
     CAMERA_ID, DISCOVERY_PORT, DATA_PORT, COMPRESS_NETWORK_DATA,
-    NETWORK_PROTOCOL, FEEDBACK_PORT, FEEDBACK_ENABLED, MASTER_IP
+    NETWORK_PROTOCOL, FEEDBACK_PORT, FEEDBACK_ENABLED, MASTER_IP,
+    NETWORK_JPEG_QUALITY, NETWORK_STREAM_WIDTH, NETWORK_STREAM_HEIGHT
 )
 
 
@@ -125,12 +126,16 @@ class CameraServer:
         self.discovery_socket = self.context.socket(zmq.PUB)
         # Allow immediate rebinding even if port is in TIME_WAIT state
         self.discovery_socket.setsockopt(zmq.LINGER, 0)
+        self.discovery_socket.setsockopt(zmq.SNDHWM, 1)
+        self.discovery_socket.setsockopt(zmq.CONFLATE, 1)
         self.discovery_socket.bind(f"tcp://*:{DISCOVERY_PORT}")
         
         # Data socket (PUB-SUB pattern)
         self.data_socket = self.context.socket(zmq.PUB)
         # Allow immediate rebinding even if port is in TIME_WAIT state
         self.data_socket.setsockopt(zmq.LINGER, 0)
+        self.data_socket.setsockopt(zmq.SNDHWM, 1)
+        self.data_socket.setsockopt(zmq.CONFLATE, 1)
         self.data_socket.bind(f"tcp://*:{DATA_PORT}")
     
     def _discovery_loop(self):
@@ -177,8 +182,11 @@ class CameraServer:
             # Encode frame as JPEG if provided
             frame_jpeg = None
             if frame is not None:
-                # Compress to JPEG (quality 70 for faster encoding)
-                success, jpeg_buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                frame_to_send = frame
+                if frame.shape[1] != NETWORK_STREAM_WIDTH or frame.shape[0] != NETWORK_STREAM_HEIGHT:
+                    frame_to_send = cv2.resize(frame, (NETWORK_STREAM_WIDTH, NETWORK_STREAM_HEIGHT), interpolation=cv2.INTER_AREA)
+
+                success, jpeg_buffer = cv2.imencode('.jpg', frame_to_send, [cv2.IMWRITE_JPEG_QUALITY, NETWORK_JPEG_QUALITY])
                 if success:
                     frame_jpeg = jpeg_buffer.tobytes()
             
@@ -254,6 +262,55 @@ class CameraServer:
             }
             for lm in landmark_list
         ]
+
+    def _feedback_loop(self):
+        """Listen for quality feedback from the master (Level 3)."""
+        print("[CameraServer] Feedback thread started")
+
+        # Initialize SUB socket
+        self.feedback_socket = self.context.socket(zmq.SUB)
+        self.feedback_socket.setsockopt(zmq.SUBSCRIBE, b"")
+        self.feedback_socket.setsockopt(zmq.RCVTIMEO, 1000)  # 1s timeout
+
+        # Connect to master
+        connected = False
+        while self.running and not self.stop_event.is_set():
+            target_ip = self.master_ip or MASTER_IP
+            if not target_ip:
+                time.sleep(1.0)
+                continue
+
+            try:
+                self.feedback_socket.connect(f"tcp://{target_ip}:{FEEDBACK_PORT}")
+                print(f"[CameraServer] Subscribed to quality feedback from {target_ip}:{FEEDBACK_PORT}")
+                connected = True
+                break
+            except Exception:
+                time.sleep(2.0)
+
+        if not connected:
+            return
+
+        while self.running and not self.stop_event.is_set():
+            try:
+                data = self.feedback_socket.recv()
+                msg = msgpack.unpackb(data, raw=False)
+
+                if msg.get('type') == 'quality_feedback':
+                    hints = msg.get('hints', {})
+                    self.quality_hints = hints
+
+                    # Log summary if errors are unusually high
+                    high_err_count = sum(1 for err in hints.values() if err > 25.0)
+                    if high_err_count > 0 and self.frame_count % 300 == 0:
+                        print(f"[CameraServer] Master Feedback: {high_err_count} noisy joints detected")
+
+            except zmq.Again:
+                continue
+            except Exception as e:
+                if self.running:
+                    print(f"[CameraServer] Feedback loop error: {e}")
+                time.sleep(1.0)
     
     def get_stats(self) -> Dict[str, Any]:
         """Get server statistics."""
@@ -278,50 +335,3 @@ if __name__ == "__main__":
         pass
     finally:
         server.stop()
-    def _feedback_loop(self):
-        """Listen for quality feedback from the master (Level 3)."""
-        print("[CameraServer] Feedback thread started")
-        
-        # Initialize SUB socket
-        self.feedback_socket = self.context.socket(zmq.SUB)
-        self.feedback_socket.setsockopt(zmq.SUBSCRIBE, b"")
-        self.feedback_socket.setsockopt(zmq.RCVTIMEO, 1000) # 1s timeout
-        
-        # Connect to master
-        connected = False
-        while self.running and not self.stop_event.is_set():
-            target_ip = self.master_ip or MASTER_IP
-            if not target_ip:
-                time.sleep(1.0)
-                continue
-                
-            try:
-                self.feedback_socket.connect(f"tcp://{target_ip}:{FEEDBACK_PORT}")
-                print(f"[CameraServer] Subscribed to quality feedback from {target_ip}:{FEEDBACK_PORT}")
-                connected = True
-                break
-            except Exception as e:
-                time.sleep(2.0)
-        
-        if not connected: return
-        
-        while self.running and not self.stop_event.is_set():
-            try:
-                data = self.feedback_socket.recv()
-                msg = msgpack.unpackb(data, raw=False)
-                
-                if msg.get('type') == 'quality_feedback':
-                    hints = msg.get('hints', {})
-                    self.quality_hints = hints
-                    
-                    # LOGGING: Print summary if errors are unusually high
-                    high_err_count = sum(1 for err in hints.values() if err > 25.0)
-                    if high_err_count > 0 and self.frame_count % 300 == 0:
-                        print(f"[CameraServer] Master Feedback: {high_err_count} noisy joints detected")
-                        
-            except zmq.Again:
-                continue
-            except Exception as e:
-                if self.running:
-                    print(f"[CameraServer] Feedback loop error: {e}")
-                time.sleep(1.0)

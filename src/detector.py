@@ -35,6 +35,9 @@ class MocapDetector:
         self.roi_min_size = ROI_MIN_SIZE
         self.roi_target_size = ROI_TARGET_SIZE
         self.roi_alpha = ROI_SMOOTHING_ALPHA
+
+        # Pre-allocate CLAHE once (reused every frame to avoid per-frame allocation leak)
+        self._clahe = cv2.createCLAHE(clipLimit=CLAHE_CLIP_LIMIT, tileGridSize=CLAHE_TILE_GRID_SIZE)
         
         # Select Pose Model based on config
         pose_model_path = MODEL_PATHS.get(POSE_MODEL_COMPLEXITY, MODEL_PATHS['LITE'])
@@ -213,7 +216,6 @@ class MocapDetector:
         """
         import numpy as np
         
-        original_frame = frame.copy()
         H_orig, W_orig = frame.shape[:2]
         
         # --- ROI CROPPING (High Quality) ---
@@ -237,8 +239,8 @@ class MocapDetector:
             
             # Ensure minimum size
             if w >= self.roi_min_size and h >= self.roi_min_size:
-                # Crop from ORIGINAL frame (Best Resolution)
-                roi_frame = original_frame[y:y+h, x:x+w]
+                # Crop from original (unprocessed) frame
+                roi_frame = frame[y:y+h, x:x+w]
                 
                 # Resize to target size for inference
                 # e.g. Crop 500x500 -> Resize 640x640 (Upscale or Downscale)
@@ -282,11 +284,10 @@ class MocapDetector:
         if self.face_exposure:
             frame = self._apply_face_exposure(frame)
             
-        # 4. CLAHE
+        # 4. CLAHE (reuse pre-allocated instance — avoids per-frame allocation)
         lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
         l, a, b = cv2.split(lab)
-        clahe = cv2.createCLAHE(clipLimit=CLAHE_CLIP_LIMIT, tileGridSize=CLAHE_TILE_GRID_SIZE)
-        cl = clahe.apply(l)
+        cl = self._clahe.apply(l)
         limg = cv2.merge((cl, a, b))
         frame = cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
         
@@ -374,7 +375,7 @@ class MocapDetector:
                  flm = face_result.face_landmarks[0]
                  xs = [lm.x for lm in flm]
                  ys = [lm.y for lm in flm]
-                 H, W = original_frame.shape[:2]
+                 H, W = H_orig, W_orig
                  x_min, x_max = min(xs) * W, max(xs) * W
                  y_min, y_max = min(ys) * H, max(ys) * H
                  self.last_face_rect = (int(x_min), int(y_min), int(x_max-x_min), int(y_max-y_min))

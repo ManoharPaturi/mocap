@@ -1,13 +1,27 @@
 import cv2
+import numpy as np
 import tkinter as tk
 from tkinter import ttk, messagebox
 import threading
+import queue
 import time
 import platform
 import os
-import torch
-import torchvision.transforms.functional as TF
-from torchvision.io import decode_jpeg
+try:
+    from PIL import Image as PILImage, ImageTk
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
+try:
+    import torch
+    import torchvision.transforms.functional as TF
+    from torchvision.io import decode_jpeg
+    TORCH_GUI_AVAILABLE = True
+except Exception:
+    torch = None
+    TF = None
+    decode_jpeg = None
+    TORCH_GUI_AVAILABLE = False
 from src.camera import Camera
 from src.detector import MocapDetector
 from src.visualizer import Visualizer
@@ -19,8 +33,10 @@ from src.calculations import Calculations
 import config
 from config import (
     DRAW_LANDMARKS, MULTI_CAMERA_MODE, REMOTE_CAMERA_IP,
-    CUDA_ENABLED, DEVICE
+    CUDA_ENABLED, MPS_ENABLED, DEVICE, TORCH_AVAILABLE
 )
+# Mac MPS + CUDA share the same tensor pipeline; only decode_jpeg differs
+_GPU_AVAILABLE = (CUDA_ENABLED or MPS_ENABLED)
 
 # Multi-camera imports (conditional)
 if MULTI_CAMERA_MODE == 'server':
@@ -75,6 +91,26 @@ class MocapGUI:
         self.session_id = None
         self.frame_count = 0
 
+        # Tkinter camera display window (replaces cv2.imshow on macOS)
+        self._cam_window = None
+        self._cam_label = None
+        self._cam_photo = None  # keep reference to avoid GC
+        self._latest_display_frame = None
+        self._latest_display_title = "Camera Feed"
+        self._display_update_pending = False
+        self._latest_metrics = None
+        self._metrics_update_pending = False
+
+        # Network send queue — latest-frame only to minimize streaming latency
+        self._send_queue = queue.Queue(maxsize=1)
+        self._send_worker_thread = threading.Thread(target=self._send_worker, daemon=True)
+        self._send_worker_thread.start()
+
+        # Remote JPEG decode queue — latest-only to keep display loop non-blocking
+        self._remote_decode_queue = queue.Queue(maxsize=1)
+        self._remote_decode_worker_thread = threading.Thread(target=self._remote_decode_worker, daemon=True)
+        self._remote_decode_worker_thread.start()
+
         # Thread-safe GUI State Caches (Initialize defaults)
         self.mirror_active = True
         self.markers_active = True
@@ -103,9 +139,8 @@ class MocapGUI:
         
         self.root.geometry("500x700")
         self.root.configure(bg='#0f0f1e')  # VS2 Dark Theme
-        self.db = MocapDB()
-        self.reporter = ReportGenerator(self.db)
-        
+        # Note: db and reporter already initialized above; do not re-init here (leaked connection)
+
         self.frame_count = 0 # Throttling counter
         
         
@@ -121,6 +156,59 @@ class MocapGUI:
         self.video_thread = threading.Thread(target=self.video_loop, daemon=True)
         self.video_thread.start()
         
+    def _display_frame_tkinter(self, frame_bgr, title="Camera Feed"):
+        """Display a BGR numpy frame in a tkinter Toplevel window (main-thread safe)."""
+        if not PIL_AVAILABLE:
+            return
+        try:
+            rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+            img = PILImage.fromarray(rgb)
+            photo = ImageTk.PhotoImage(image=img)
+
+            if self._cam_window is None or not self._cam_window.winfo_exists():
+                self._cam_window = tk.Toplevel(self.root)
+                self._cam_window.title(title)
+                self._cam_window.configure(bg='black')
+                self._cam_label = tk.Label(self._cam_window, bg='black')
+                self._cam_label.pack()
+
+            self._cam_window.title(title)
+            self._cam_label.configure(image=photo)
+            self._cam_photo = photo  # prevent GC
+        except Exception as e:
+            if self.frame_count % 100 == 0:
+                print(f"[Display] Frame render error: {e}")
+
+    def _flush_display_tkinter(self):
+        """Render only the latest queued frame on the Tk main thread."""
+        self._display_update_pending = False
+        frame = self._latest_display_frame
+        title = self._latest_display_title
+        if frame is not None:
+            self._display_frame_tkinter(frame, title)
+
+    def _schedule_display_tkinter(self, frame_bgr, title="Camera Feed"):
+        """Queue newest frame for display; never let Tkinter callback backlog build."""
+        self._latest_display_frame = frame_bgr
+        self._latest_display_title = title
+        if not self._display_update_pending:
+            self._display_update_pending = True
+            self.root.after(0, self._flush_display_tkinter)
+
+    def _flush_metrics_gui(self):
+        """Apply latest metrics update on Tk main thread."""
+        self._metrics_update_pending = False
+        metrics = self._latest_metrics
+        if metrics is not None:
+            self.update_metrics_gui(metrics)
+
+    def _schedule_metrics_gui(self, metrics):
+        """Coalesce metrics updates so GUI never backlogs."""
+        self._latest_metrics = metrics
+        if not self._metrics_update_pending:
+            self._metrics_update_pending = True
+            self.root.after(0, self._flush_metrics_gui)
+
     def _on_mousewheel(self, event):
         self.canvas.yview_scroll(int(-1*(event.delta/120)), "units")
 
@@ -454,6 +542,43 @@ class MocapGUI:
             f.write(csv_content)
         messagebox.showinfo("Export Complete", f"Dataset saved to {filename}")
 
+    def _send_worker(self):
+        """Single background thread that drains the network send queue.
+        Replaces the per-frame threading.Thread spawn which caused thread buildup."""
+        while self.running:
+            try:
+                item = self._send_queue.get(timeout=0.5)
+                if item is None:
+                    break
+                frame_number, timestamp, results, frame_copy = item
+                self.network_server.send_frame_data(frame_number, timestamp, results, frame_copy)
+            except queue.Empty:
+                continue
+            except Exception as e:
+                print(f"[SERVER] Send worker error: {e}")
+
+    def _remote_decode_worker(self):
+        """Background worker that decodes remote JPEG frames without blocking video_loop."""
+        while self.running:
+            try:
+                item = self._remote_decode_queue.get(timeout=0.5)
+                if item is None:
+                    break
+
+                jpeg, display_width, display_height = item
+                if not jpeg:
+                    continue
+
+                jpg_np = np.frombuffer(bytes(jpeg), dtype=np.uint8)
+                decoded = cv2.imdecode(jpg_np, cv2.IMREAD_COLOR)
+                if decoded is not None:
+                    self.remote_frame = cv2.resize(decoded, (display_width, display_height))
+            except queue.Empty:
+                continue
+            except Exception as e:
+                if self.frame_count % 100 == 0:
+                    print(f"[Display] Remote decode error: {e}")
+
     def video_loop(self):
         while self.running:
             frame = self.camera.read()
@@ -518,7 +643,8 @@ class MocapGUI:
                     self.prev_metrics = metrics
                     self.prev_time = now
 
-                    self.root.after(0, self.update_metrics_gui, metrics)
+                    if self.frame_count % 2 == 0:
+                        self._schedule_metrics_gui(metrics)
                 except: pass
             # -------------------------
             
@@ -527,19 +653,23 @@ class MocapGUI:
                 frame = self.visualizer.draw_landmarks(frame, results)
             # -----------------------------------------------------------
             
-            # --- NETWORK BROADCASTING (Server Mode) - ASYNC ---
+            # --- NETWORK BROADCASTING (Server Mode) - via send queue ---
             if self.network_server:
-                # Non-blocking: send in background thread (like DB saves)
                 timestamp = int(time.time() * 1e9)
-                frame_copy = frame.copy()  # Copy to avoid race conditions
-                
-                # Send async (don't wait for JPEG encoding)
-                threading.Thread(
-                    target=self.network_server.send_frame_data,
-                    args=(self.frame_count, timestamp, results, frame_copy),
-                    daemon=True
-                ).start()
-                
+                try:
+                    # Non-blocking enqueue
+                    self._send_queue.put_nowait((self.frame_count, timestamp, results, frame.copy()))
+                except queue.Full:
+                    # Queue already has a stale frame waiting to be encoded/sent; replace with newest
+                    try:
+                        self._send_queue.get_nowait()
+                    except queue.Empty:
+                        pass
+                    try:
+                        self._send_queue.put_nowait((self.frame_count, timestamp, results, frame.copy()))
+                    except queue.Full:
+                        pass
+
                 # Debug only first 3 frames
                 if self.frame_count <= 3:
                     print(f"[SERVER] Queued frame {self.frame_count}")
@@ -586,11 +716,7 @@ class MocapGUI:
                      
             self.frame_count += 1
 
-            # 2. Draw Markers (Toggle)
-            if self.markers_active:
-                if DRAW_LANDMARKS:
-                    frame = self.visualizer.draw_landmarks(frame, results)
-            
+            # Draw FPS overlay (landmarks already drawn above before network send)
             frame = self.visualizer.draw_fps(frame)
             fps = self.visualizer.get_fps()
             
@@ -600,81 +726,48 @@ class MocapGUI:
             except: pass 
             
             # --- DUAL CAMERA DISPLAY (Master Mode) ---
+            # Display uses CPU only — MediaPipe already uses Metal for inference.
+            # GPU tensor path was causing 3GB/s MPS memory leak (never freed per-frame tensors).
             if MULTI_CAMERA_MODE == 'master' and self.coordinator:
                 display_width, display_height = 640, 480
-                local_frame_gpu = None
-                remote_frame_gpu = None
                 sync_label = "WAITING"
 
-                # 1. Prepare Local Frame on GPU if CUDA enabled
-                if CUDA_ENABLED:
-                    try:
-                        # Convert BGR to RGB and to tensor [C, H, W]
-                        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                        local_tensor = torch.from_numpy(rgb_frame).permute(2, 0, 1).to(DEVICE)
-                        local_frame_gpu = TF.resize(local_tensor, [display_height, display_width], antialias=True)
-                    except Exception as e:
-                        if self.frame_count % 100 == 0:
-                            print(f"[GPU] Local Resize Error: {e}")
-                        local_frame_display = cv2.resize(frame, (display_width, display_height))
-                else:
-                    local_frame_display = cv2.resize(frame, (display_width, display_height))
+                # 1. Local frame — CPU resize
+                local_display = cv2.resize(frame, (display_width, display_height))
 
-                # 2. Prepare Remote Frame on GPU
+                # 2. Remote frame — CPU JPEG decode + resize
+                remote_display = np.zeros((display_height, display_width, 3), dtype=np.uint8)
                 if 'cam_0' in self.coordinator.frame_buffers:
                     buf = self.coordinator.frame_buffers['cam_0']
                     if len(buf) > 0:
                         latest = buf[-1]
-                        if 'frame_jpeg' in latest.results and latest.results['frame_jpeg']:
+                        jpeg = latest.results.get('frame_jpeg')
+                        if jpeg:
                             try:
-                                if CUDA_ENABLED:
-                                    # DECODE DIRECTLY ON GPU
-                                    jpeg_tensor = torch.from_numpy(np.frombuffer(latest.results['frame_jpeg'], dtype=np.uint8)).to(DEVICE)
-                                    # Torchvision decode returns [C, H, W]
-                                    decoded_gpu = decode_jpeg(jpeg_tensor, device=DEVICE)
-                                    remote_frame_gpu = TF.resize(decoded_gpu, [display_height, display_width], antialias=True)
-                                    sync_label = "LIVE"
-                                else:
-                                    # Fallback to CPU OpenCV
-                                    jpeg_bytes = bytes(latest.results['frame_jpeg'])
-                                    jpg_np = np.frombuffer(jpeg_bytes, dtype=np.uint8)
-                                    decoded = cv2.imdecode(jpg_np, cv2.IMREAD_COLOR)
-                                    if decoded is not None:
-                                        remote_frame = cv2.resize(decoded, (display_width, display_height))
-                                        self.remote_frame = remote_frame
-                                        sync_label = "LIVE"
-                            except Exception as e:
-                                if self.frame_count % 100 == 0:
-                                    print(f"[GPU] Remote Decode/Resize Error: {e}")
+                                self._remote_decode_queue.put_nowait((jpeg, display_width, display_height))
+                            except queue.Full:
+                                try:
+                                    self._remote_decode_queue.get_nowait()
+                                except queue.Empty:
+                                    pass
+                                try:
+                                    self._remote_decode_queue.put_nowait((jpeg, display_width, display_height))
+                                except queue.Full:
+                                    pass
 
-                # 3. Combine and Move to CPU for display
-                if CUDA_ENABLED and local_frame_gpu is not None:
-                    try:
-                        # Ensure we have a remote frame for side-by-side
-                        if remote_frame_gpu is None:
-                            remote_frame_gpu = torch.zeros_like(local_frame_gpu)
-                        
-                        # Stack horizontally [C, H, W1+W2]
-                        combined_gpu = torch.cat([local_frame_gpu, remote_frame_gpu], dim=2)
-                        
-                        # Move to CPU, permute back to [H, W, C], convert to BGR for OpenCV
-                        combined_cpu = combined_gpu.permute(1, 2, 0).cpu().numpy()
-                        combined_bgr = cv2.cvtColor(combined_cpu, cv2.COLOR_RGB2BGR)
-                        
-                        cv2.putText(combined_bgr, f"LOCAL ({sync_label})", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                        cv2.putText(combined_bgr, "REMOTE (MAC)", (display_width + 10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-                        
-                        if platform.system() != 'Darwin':
-                            cv2.imshow("Dual Camera View - Master (GPU ACCEL)", combined_bgr)
-                    except Exception as e:
-                        if self.frame_count % 100 == 0:
-                            print(f"[GPU] Display Stack Error: {e}")
-                else:
-                    # CPU Fallback Side-by-Side
-                    if remote_frame is None:
-                        remote_frame = np.zeros((display_height, display_width, 3), dtype=np.uint8)
-                    combined = np.hstack([local_frame_display, remote_frame])
-                    cv2.imshow("Dual Camera View - Master (CPU)", combined)
+                        if self.remote_frame is not None:
+                            remote_display = self.remote_frame
+                            sync_label = "LIVE" if jpeg else "BUFFERED"
+                    # Debug: print every 5s when no frames arriving
+                    if self.frame_count % 150 == 0 and sync_label == "WAITING":
+                        total = sum(self.coordinator.stats['frames_received'].values())
+                        print(f"[Display] cam_0 buf size={len(buf)}, total_rx={total} — check Windows firewall (ports 6000,6001)")
+
+                # 3. Combine side-by-side and push to tkinter window
+                cv2.putText(local_display, f"LOCAL-MAC", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                cv2.putText(remote_display, f"REMOTE-WIN ({sync_label})", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                combined = np.hstack([local_display, remote_display])
+                self._schedule_display_tkinter(combined, "Dual Camera — Master")
                 
                 # --- DISPLAY SYNC STATUS & 3D CALC ---
                 # Check sync status and RUN 3D TRIANGULATION
@@ -713,14 +806,18 @@ class MocapGUI:
                 # FINAL GPU DISPLAY (or CPU Fallback defined earlier)
                 # Note: Labels are already applied in the GPU/CPU blocks above
             else:
-                # Single camera mode or server mode
-                # Mac: Skip OpenCV window (GUI dashboard works fine)
-                if platform.system() != 'Darwin':
+                # Single camera or server mode — show in tkinter on Mac, cv2 on Windows
+                if platform.system() == 'Darwin':
+                    _frame_copy = frame.copy()
+                    self._schedule_display_tkinter(_frame_copy, "MoCap Live Feed")
+                else:
                     cv2.imshow("MoCap Live Feed", frame)
-            
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                self.running = False
-                break
+
+            # cv2.waitKey crashes on macOS when called from a background thread
+            if platform.system() != 'Darwin':
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    self.running = False
+                    break
         
         self.cleanup()
 
@@ -777,16 +874,26 @@ class MocapGUI:
 
     def cleanup(self):
         self.running = False
+        # Signal the send worker thread to exit gracefully
+        try:
+            self._send_queue.put_nowait(None)
+        except Exception:
+            pass
+        if hasattr(self, '_send_worker_thread'):
+            self._send_worker_thread.join(timeout=2.0)
+        # Signal remote decode worker to exit gracefully
+        try:
+            self._remote_decode_queue.put_nowait(None)
+        except Exception:
+            pass
+        if hasattr(self, '_remote_decode_worker_thread'):
+            self._remote_decode_worker_thread.join(timeout=2.0)
         if self.camera: self.camera.release()
         if self.db: self.db.stop_recording()
         if self.network_server: self.network_server.stop()
         if self.coordinator: self.coordinator.stop()
+        cv2.destroyAllWindows()
         if self.root: self.root.quit()
-        self.tree.insert("", 0, values=(ts, *row_values))
-        
-        children = self.tree.get_children()
-        if len(children) > 10:
-            self.tree.delete(children[-1])
 
     def update_metrics_gui(self, metrics):
         """Update angle labels with latest metrics."""
@@ -800,13 +907,6 @@ class MocapGUI:
             else:
                 label_widget.config(text="0.0")
 
-    def cleanup(self):
-        self.camera.release()
-        cv2.destroyAllWindows()
-        self.root.quit()
-        
-    def run(self):
-        self.root.mainloop()
 
 if __name__ == "__main__":
     app = MocapGUI()
