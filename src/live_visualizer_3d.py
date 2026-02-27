@@ -32,8 +32,8 @@ class LiveVisualizer3D:
         
         # Set fixed limits (Normalized Mocap Volume)
         self.ax.set_xlim(-1, 1)
-        self.ax.set_ylim(-1, 1) # Depth
-        self.ax.set_zlim(-1, 1) # Height
+        self.ax.set_ylim(-1, 1) # Depth (Z)
+        self.ax.set_zlim(-1, 1) # Height (Y)
         
         self.ax.set_xlabel('X')
         self.ax.set_ylabel('Z (Depth)')
@@ -56,17 +56,28 @@ class LiveVisualizer3D:
 
         # Extract landmarks (first person)
         if 'pose_3d' in pose_3d_data and len(pose_3d_data['pose_3d']) > 0:
-            person = pose_3d_data['pose_3d'][0]
-            
+            pose = pose_3d_data['pose_3d']
+
+            if isinstance(pose, dict):
+                person = [pose[idx] for idx in sorted(pose.keys())]
+            elif isinstance(pose, list):
+                person = pose[0] if pose and isinstance(pose[0], list) else pose
+            else:
+                person = []
+
+            if not person:
+                plt.pause(0.001)
+                return
+
             xs = [lm['x'] for lm in person]
-            ys = [-lm['y'] for lm in person] # Invert Y for correct visual up/down
-            zs = [-lm['z'] for lm in person] # Invert Z for correct forward/back
+            ys = [lm['y'] for lm in person]
+            zs = [lm['z'] for lm in person]
             
             self.ax.clear()
             
             # Reset Limits (MPL clears them on clear())
             self.ax.set_xlim(-1, 1)
-            self.ax.set_ylim(0, 2)
+            self.ax.set_ylim(-1, 1)
             self.ax.set_zlim(-1, 1)
             
             # Scatter Points

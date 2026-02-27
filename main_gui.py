@@ -100,6 +100,7 @@ class MocapGUI:
         self._display_update_pending = False
         self._latest_metrics = None
         self._metrics_update_pending = False
+        self._ui_task_queue = queue.Queue()
 
         # Network send queue — latest-frame only to minimize streaming latency
         self._send_queue = queue.Queue(maxsize=1)
@@ -125,6 +126,7 @@ class MocapGUI:
         self.prev_lm = []
         self.prev_metrics = {}
         self.prev_time = None
+        self.latest_quality = {}
         
         # Create tkinter window
         self.root = tk.Tk()
@@ -146,10 +148,17 @@ class MocapGUI:
         
         # Setup GUI First (Important: Initialize vars before thread starts)
         self.setup_gui()
+        self._start_ui_poller()
         
         # Mac OpenCV fix: Start window thread before video loop
         if platform.system() == 'Darwin':  # macOS
-            cv2.startWindowThread()
+            try:
+                # Some OpenCV builds on macOS can segfault in startWindowThread().
+                # It is optional for this app because display is handled via Tkinter.
+                if hasattr(cv2, 'startWindowThread'):
+                    cv2.startWindowThread()
+            except Exception as e:
+                print(f"[GUI] Warning: cv2.startWindowThread skipped: {e}")
         
         # Start Video Thread
         self.running = True
@@ -191,9 +200,7 @@ class MocapGUI:
         """Queue newest frame for display; never let Tkinter callback backlog build."""
         self._latest_display_frame = frame_bgr
         self._latest_display_title = title
-        if not self._display_update_pending:
-            self._display_update_pending = True
-            self.root.after(0, self._flush_display_tkinter)
+        self._display_update_pending = True
 
     def _flush_metrics_gui(self):
         """Apply latest metrics update on Tk main thread."""
@@ -205,9 +212,39 @@ class MocapGUI:
     def _schedule_metrics_gui(self, metrics):
         """Coalesce metrics updates so GUI never backlogs."""
         self._latest_metrics = metrics
-        if not self._metrics_update_pending:
-            self._metrics_update_pending = True
-            self.root.after(0, self._flush_metrics_gui)
+        self._metrics_update_pending = True
+
+    def _enqueue_ui_task(self, func, *args, **kwargs):
+        """Thread-safe: enqueue a callable to run on Tk main thread."""
+        try:
+            self._ui_task_queue.put_nowait((func, args, kwargs))
+        except Exception:
+            pass
+
+    def _start_ui_poller(self):
+        """Main-thread polling loop for queued UI tasks and coalesced updates."""
+        def _poll():
+            # Execute queued tasks
+            for _ in range(32):  # bound work per tick
+                try:
+                    func, args, kwargs = self._ui_task_queue.get_nowait()
+                except queue.Empty:
+                    break
+                try:
+                    func(*args, **kwargs)
+                except Exception:
+                    pass
+
+            # Flush coalesced updates
+            if self._display_update_pending:
+                self._flush_display_tkinter()
+            if self._metrics_update_pending:
+                self._flush_metrics_gui()
+
+            if self.running:
+                self.root.after(15, _poll)
+
+        self.root.after(15, _poll)
 
     def _on_mousewheel(self, event):
         self.canvas.yview_scroll(int(-1*(event.delta/120)), "units")
@@ -441,6 +478,104 @@ class MocapGUI:
                                           width=18, bd=0, relief=tk.FLAT)
              self.live_btn.pack(pady=5)
         
+        # ── Latency Panel (Master Mode) ──
+        if MULTI_CAMERA_MODE == 'master':
+            latency_frame = tk.LabelFrame(parent, text="⏱ Pipeline Latency",
+                                          bg='#0f0f1e', fg='#ffa500',
+                                          font=("Arial", 10, "bold"))
+            latency_frame.pack(fill=tk.X, padx=20, pady=5)
+            
+            self.latency_labels = {}
+            latency_stages = [
+                ("Capture", "capture"), ("Detection", "detection"),
+                ("Network", "network"), ("Sync", "sync"),
+                ("Triangulation", "triangulation"), ("Total", "total")
+            ]
+            for i, (display_name, key) in enumerate(latency_stages):
+                row = i // 3
+                col = i % 3
+                tk.Label(latency_frame, text=display_name, bg='#0f0f1e',
+                         fg='#aaa', font=("Arial", 9)).grid(
+                    row=row * 2, column=col, padx=8, pady=(3, 0), sticky='s')
+                val_label = tk.Label(latency_frame, text="--", bg='#0f0f1e',
+                                     fg='#ffa500', font=("Courier", 10, "bold"))
+                val_label.grid(row=row * 2 + 1, column=col, padx=8, pady=(0, 3), sticky='n')
+                self.latency_labels[key] = val_label
+            latency_frame.columnconfigure(0, weight=1)
+            latency_frame.columnconfigure(1, weight=1)
+            latency_frame.columnconfigure(2, weight=1)
+        else:
+            self.latency_labels = {}
+
+        # ── Reconstruction Quality Panel (Master Mode) ──
+        if MULTI_CAMERA_MODE == 'master':
+            quality_frame = tk.LabelFrame(parent, text="🎯 Reconstruction Quality",
+                                          bg='#0f0f1e', fg='#00d4ff',
+                                          font=("Arial", 10, "bold"))
+            quality_frame.pack(fill=tk.X, padx=20, pady=5)
+
+            self.quality_labels = {}
+            quality_items = [
+                ("Reproj", "reproj_error", "px"),
+                ("Confidence", "confidence", ""),
+                ("Residual", "residual_error", "px"),
+                ("Uncertainty", "uncertainty", "m"),
+            ]
+            for i, (display_name, key, unit) in enumerate(quality_items):
+                row = i // 2
+                col = i % 2
+                tk.Label(quality_frame, text=display_name, bg='#0f0f1e',
+                         fg='#aaa', font=("Arial", 9)).grid(
+                    row=row * 2, column=col, padx=8, pady=(3, 0), sticky='s')
+                val_label = tk.Label(quality_frame, text=f"--{unit}", bg='#0f0f1e',
+                                     fg='#00d4ff', font=("Courier", 10, "bold"))
+                val_label.grid(row=row * 2 + 1, column=col, padx=8, pady=(0, 3), sticky='n')
+                self.quality_labels[key] = (val_label, unit)
+
+            quality_frame.columnconfigure(0, weight=1)
+            quality_frame.columnconfigure(1, weight=1)
+        else:
+            self.quality_labels = {}
+
+        # ── Help Button ──
+        help_frame = tk.Frame(parent, bg='#0f0f1e')
+        help_frame.pack(fill=tk.X, padx=20, pady=5)
+        
+        help_btn = tk.Button(help_frame, text="❓ Metric Help",
+                             command=self._show_help_dialog,
+                             font=("Arial", 11),
+                             bg='#1a1a2e', fg='#00d4ff',
+                             width=18, bd=0, relief=tk.FLAT)
+        help_btn.pack(side=tk.LEFT, padx=5)
+
+        # Recalibration button (master mode)
+        if MULTI_CAMERA_MODE == 'master':
+            recal_btn = tk.Button(help_frame, text="🔧 Recalibrate",
+                                  command=self._start_recalibration,
+                                  font=("Arial", 11),
+                                  bg='#1a1a2e', fg='#ff6666',
+                                  width=18, bd=0, relief=tk.FLAT)
+            recal_btn.pack(side=tk.RIGHT, padx=5)
+
+        # Camera placement viewer (master mode)
+        if MULTI_CAMERA_MODE == 'master':
+            cam_viz_frame = tk.Frame(parent, bg='#0f0f1e')
+            cam_viz_frame.pack(fill=tk.X, padx=20, pady=3)
+            cam_viz_btn = tk.Button(cam_viz_frame, text="📷 Camera Setup Viewer",
+                                    command=self._show_camera_setup,
+                                    font=("Arial", 11),
+                                    bg='#1a1a2e', fg='#00d4ff',
+                                    width=22, bd=0, relief=tk.FLAT)
+            cam_viz_btn.pack()
+
+            # Guided calibration wizard (launches CalibrationUI)
+            cal_wizard_btn = tk.Button(cam_viz_frame, text="🎯 Calibration Wizard",
+                                       command=self._launch_calibration_wizard,
+                                       font=("Arial", 11),
+                                       bg='#1a1a2e', fg='#ffa500',
+                                       width=22, bd=0, relief=tk.FLAT)
+            cal_wizard_btn.pack(pady=3)
+
         # Initial attribute sync
         self.update_toggles()
         self.update_imaging()
@@ -481,6 +616,364 @@ class MocapGUI:
             self.detector.reload(model_type)
         except Exception as e:
             print(f"Error reloading model: {e}")
+
+    def _show_help_dialog(self):
+        """Show a help dialog with metric definitions and equations."""
+        help_win = tk.Toplevel(self.root)
+        help_win.title("Metric Help & Glossary")
+        help_win.geometry("520x600")
+        help_win.configure(bg='#0f0f1e')
+        
+        # Scrollable text
+        text_frame = tk.Frame(help_win, bg='#0f0f1e')
+        text_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        scrollbar = tk.Scrollbar(text_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        text_widget = tk.Text(text_frame, wrap=tk.WORD, bg='#1a1a2e', fg='#e0e0e0',
+                              font=("Courier", 11), yscrollcommand=scrollbar.set,
+                              padx=10, pady=10)
+        text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=text_widget.yview)
+        
+        # Tag for headers
+        text_widget.tag_configure('header', foreground='#00d4ff', font=("Arial", 13, "bold"))
+        text_widget.tag_configure('subheader', foreground='#ffa500', font=("Arial", 11, "bold"))
+        text_widget.tag_configure('formula', foreground='#00ff88', font=("Courier", 11))
+        
+        help_content = [
+            ("header", "MoCap Metric Reference\n\n"),
+            ("subheader", "Joint Angles\n"),
+            ("", "Computed via 3D arc-cosine of bone vectors.\n"),
+            ("formula", "  θ = arccos( (A·B) / (|A|·|B|) )\n\n"),
+            ("subheader", "Elbow Angle (L/R)\n"),
+            ("", "Angle between upper arm and forearm.\n"
+                 "Landmarks: Shoulder → Elbow → Wrist\n"
+                 "Range: 0° (fully flexed) to 180° (fully extended)\n\n"),
+            ("subheader", "Knee Angle (L/R)\n"),
+            ("", "Angle between thigh and shin.\n"
+                 "Landmarks: Hip → Knee → Ankle\n"
+                 "Range: 0° (fully bent) to 180° (standing straight)\n\n"),
+            ("subheader", "Shoulder Angle (L/R)\n"),
+            ("", "Angle of upper arm relative to torso.\n"
+                 "Landmarks: Hip → Shoulder → Elbow\n\n"),
+            ("subheader", "Velocities\n"),
+            ("", "Angular velocity = Δθ / Δt  (degrees/second)\n"
+                 "Linear velocity  = Δp / Δt  (meters/second)\n\n"),
+            ("formula", "  v = |p(t) - p(t-1)| / dt\n\n"),
+            ("subheader", "Bone Lengths\n"),
+            ("", "Euclidean distance between joint endpoints.\n"
+                 "Normalized by body height estimate.\n\n"),
+            ("subheader", "Confidence / Visibility\n"),
+            ("", "Per-landmark confidence from MediaPipe (0-1).\n"
+                 "Values below 0.5 are treated as unreliable.\n\n"),
+            ("formula", "  conf = w_vis × avg_visibility + w_reproj × (1 - err/threshold)\n\n"),
+            ("subheader", "3D Reconstruction Methods\n"),
+            ("", "• triangulated: DLT from ≥2 camera views (best)\n"
+                 "• monocular_X: Back-projected from single camera (fallback)\n"
+                 "• world_landmarks: MediaPipe hip-relative coords (Tier 3)\n"
+                 "• predicted: Held from last visible position (occluded)\n\n"),
+            ("subheader", "Uncertainty (Disagreement)\n"),
+            ("", "Max pairwise distance between per-camera monocular\n"
+                 "estimates for the same landmark. Lower = more confident.\n\n"),
+            ("formula", "  uncertainty = max‖p_A - p_B‖ for all camera pairs\n\n"),
+            ("subheader", "Occlusion States\n"),
+            ("", "• VISIBLE: Landmark seen by ≥1 camera\n"
+                 "• PREDICTED: Using last known position (≤500ms)\n"
+                 "• OCCLUDED: Lost for too long, dropped\n\n"),
+            ("subheader", "1-Euro Filter\n"),
+            ("", "Adaptive low-pass filter for jitter reduction.\n"
+                 "min_cutoff: smoothness at rest (Hz)\n"
+                 "beta: responsiveness during fast motion\n\n"),
+            ("formula", "  cutoff = min_cutoff + beta × |dx/dt|\n"),
+        ]
+        
+        for tag, content in help_content:
+            if tag:
+                text_widget.insert(tk.END, content, tag)
+            else:
+                text_widget.insert(tk.END, content)
+        
+        text_widget.config(state=tk.DISABLED)
+
+    def _start_recalibration(self):
+        """Launch recalibration workflow (guided chessboard capture)."""
+        if not self.coordinator:
+            messagebox.showwarning("Recalibration",
+                                   "Recalibration requires master mode with active cameras.")
+            return
+        
+        result = messagebox.askyesno(
+            "Recalibration",
+            "This will start a guided stereo recalibration.\n\n"
+            "Requirements:\n"
+            "• 9×6 chessboard pattern visible to BOTH cameras\n"
+            "• Hold board steady at different angles\n"
+            "• 15-20 captures recommended\n\n"
+            "The system will capture pairs of frames when you press SPACE.\n"
+            "Press ESC when done.\n\n"
+            "Start recalibration?"
+        )
+        if not result:
+            return
+        
+        # Run calibration in a background thread
+        threading.Thread(target=self._run_recalibration, daemon=True).start()
+
+    def _run_recalibration(self):
+        """Background thread for interactive recalibration."""
+        from src.stereo_calibration import StereoCalibration
+        import cv2 as _cv2
+
+        calibration = StereoCalibration()
+        captures_left = []
+        captures_right = []
+        capture_count = 0
+        checkerboard_size = (9, 6)
+
+        print("[Recalibration] Starting — press SPACE to capture, ESC to finish")
+
+        while True:
+            # Get frames from both cameras
+            local_frame = self.camera.read()
+            if local_frame is None:
+                continue
+
+            remote_frame = None
+            if self.remote_frame is not None:
+                remote_frame = self.remote_frame.copy()
+
+            if remote_frame is None:
+                time.sleep(0.1)
+                continue
+
+            # Try to find chessboard in both frames
+            gray_l = _cv2.cvtColor(local_frame, _cv2.COLOR_BGR2GRAY)
+            gray_r = _cv2.cvtColor(remote_frame, _cv2.COLOR_BGR2GRAY)
+
+            found_l, corners_l = _cv2.findChessboardCorners(gray_l, checkerboard_size, None)
+            found_r, corners_r = _cv2.findChessboardCorners(gray_r, checkerboard_size, None)
+
+            # Draw on display copies
+            disp_l = local_frame.copy()
+            disp_r = remote_frame.copy()
+            if found_l:
+                _cv2.drawChessboardCorners(disp_l, checkerboard_size, corners_l, found_l)
+            if found_r:
+                _cv2.drawChessboardCorners(disp_r, checkerboard_size, corners_r, found_r)
+
+            status = f"Captures: {capture_count} | "
+            status += "BOTH FOUND ✓" if (found_l and found_r) else "Searching..."
+            _cv2.putText(disp_l, status, (10, 30), _cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+            h = min(disp_l.shape[0], disp_r.shape[0])
+            w = min(disp_l.shape[1], disp_r.shape[1])
+            combined = np.hstack([
+                _cv2.resize(disp_l, (w, h)),
+                _cv2.resize(disp_r, (w, h))
+            ])
+            self._schedule_display_tkinter(combined, "Recalibration")
+
+            # Check for keypress (non-blocking)
+            key = _cv2.waitKey(30) & 0xFF
+            if key == 27:  # ESC
+                break
+            elif key == 32 and found_l and found_r:  # SPACE
+                corners_l_refined = _cv2.cornerSubPix(
+                    gray_l, corners_l, (11, 11), (-1, -1),
+                    (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+                )
+                corners_r_refined = _cv2.cornerSubPix(
+                    gray_r, corners_r, (11, 11), (-1, -1),
+                    (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+                )
+                captures_left.append(corners_l_refined)
+                captures_right.append(corners_r_refined)
+                capture_count += 1
+                print(f"[Recalibration] Captured pair #{capture_count}")
+
+            time.sleep(0.033)
+
+        if capture_count < 5:
+            self._enqueue_ui_task(
+                messagebox.showwarning,
+                "Recalibration", f"Only {capture_count} captures — need at least 5. Aborted."
+            )
+            return
+
+        # Compute calibration
+        print(f"[Recalibration] Computing from {capture_count} pairs...")
+        try:
+            # Prepare object points
+            objp = np.zeros((checkerboard_size[0] * checkerboard_size[1], 3), np.float32)
+            objp[:, :2] = np.mgrid[0:checkerboard_size[0], 0:checkerboard_size[1]].T.reshape(-1, 2) * 0.025
+
+            object_points = [objp] * capture_count
+            h_l, w_l = gray_l.shape[:2]
+            h_r, w_r = gray_r.shape[:2]
+
+            # Intrinsic calibration for both cameras
+            ret_l, K_l, dist_l, _, _ = _cv2.calibrateCamera(
+                object_points, captures_left, (w_l, h_l), None, None)
+            ret_r, K_r, dist_r, _, _ = _cv2.calibrateCamera(
+                object_points, captures_right, (w_r, h_r), None, None)
+
+            # Stereo calibration
+            ret_s, _, _, _, _, R, T, E, F = _cv2.stereoCalibrate(
+                object_points, captures_left, captures_right,
+                K_l, dist_l, K_r, dist_r, (w_l, h_l),
+                criteria=(cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 1e-5),
+                flags=cv2.CALIB_FIX_INTRINSIC
+            )
+
+            print(f"[Recalibration] Stereo RMS error: {ret_s:.4f}")
+
+            # Save calibration
+            calibration.cameras['local_cam'] = type(calibration.cameras.get('local_cam', None) or
+                                                     type('CC', (), {}))
+            from src.stereo_calibration import CameraCalibration
+            calibration.cameras['local_cam'] = CameraCalibration(
+                camera_id='local_cam', intrinsic_matrix=K_l,
+                distortion_coeffs=dist_l, rotation=np.eye(3),
+                translation=np.zeros((3, 1)), image_size=(w_l, h_l),
+                reprojection_error=ret_l
+            )
+            calibration.cameras['cam_0'] = CameraCalibration(
+                camera_id='cam_0', intrinsic_matrix=K_r,
+                distortion_coeffs=dist_r, rotation=R,
+                translation=T, image_size=(w_r, h_r),
+                reprojection_error=ret_r
+            )
+
+            cal_file = f"calibration_{int(time.time())}.json"
+            calibration.save_calibration(cal_file)
+
+            # Reload into coordinator
+            if self.coordinator and self.coordinator.triangulator:
+                self.coordinator.triangulator.calibration = calibration
+                print(f"[Recalibration] Live calibration updated!")
+
+            self._enqueue_ui_task(
+                messagebox.showinfo,
+                "Recalibration Complete",
+                f"Stereo RMS: {ret_s:.4f}\nSaved to: {cal_file}\n"
+                f"Calibration loaded into live pipeline."
+            )
+
+        except Exception as e:
+            print(f"[Recalibration] Error: {e}")
+            self._enqueue_ui_task(
+                messagebox.showerror,
+                "Recalibration Failed", str(e)
+            )
+
+    def _update_latency_panel(self):
+        """Update latency labels from coordinator stats (called from main thread)."""
+        if not self.latency_labels or not self.coordinator:
+            return
+        try:
+            stats = self.coordinator.get_latency_stats()
+            for stage, label in self.latency_labels.items():
+                if stage in stats:
+                    ms = stats[stage]['mean_ms']
+                    label.config(text=f"{ms:.1f}ms")
+                else:
+                    label.config(text="--")
+        except Exception:
+            pass
+
+    def _extract_quality_metrics(self, pose_3d: dict) -> dict:
+        """Extract aggregate quality metrics from fused pose output."""
+        if not pose_3d:
+            return {}
+
+        pose_points = pose_3d.get('pose_3d', {}) or {}
+        uncertainty_map = pose_3d.get('uncertainty', {}) or {}
+
+        reproj_vals = []
+        confidence_vals = []
+        for point in pose_points.values():
+            if not isinstance(point, dict):
+                continue
+            method = point.get('method', '')
+            if method == 'triangulated':
+                if point.get('reproj_error') is not None:
+                    reproj_vals.append(float(point.get('reproj_error', 0.0)))
+                if point.get('visibility') is not None:
+                    confidence_vals.append(float(point.get('visibility', 0.0)))
+
+        uncertainty_vals = [float(v) for v in uncertainty_map.values() if v is not None]
+
+        mean_reproj = (sum(reproj_vals) / len(reproj_vals)) if reproj_vals else None
+        mean_conf = (sum(confidence_vals) / len(confidence_vals)) if confidence_vals else None
+        mean_uncertainty = (sum(uncertainty_vals) / len(uncertainty_vals)) if uncertainty_vals else None
+
+        summary = pose_3d.get('uncertainty_summary', {}) or {}
+        summary_grade = summary.get('quality_grade')
+        summary_mean_unc = summary.get('mean_uncertainty_m')
+
+        # Residual error is represented by reprojection residual in this pipeline.
+        return {
+            'reproj_error': mean_reproj,
+            'confidence': mean_conf,
+            'residual_error': mean_reproj,
+            'uncertainty': mean_uncertainty,
+            'uncertainty_summary_m': summary_mean_unc,
+            'quality_grade': summary_grade,
+        }
+
+    def _update_quality_panel(self):
+        """Update reconstruction quality labels from latest fused pose metrics."""
+        if not self.quality_labels:
+            return
+
+        metrics = self.latest_quality or {}
+        for key, (label, unit) in self.quality_labels.items():
+            value = metrics.get(key)
+            if value is None:
+                label.config(text=f"--{unit}")
+                continue
+
+            if key == 'confidence':
+                label.config(text=f"{value:.3f}{unit}")
+            elif key == 'uncertainty':
+                label.config(text=f"{value:.4f}{unit}")
+            else:
+                label.config(text=f"{value:.2f}{unit}")
+
+    def _launch_calibration_wizard(self):
+        """Launch calibration workflow from dashboard button."""
+        # Keep the established integrated recalibration flow for live camera pairs.
+        self._start_recalibration()
+
+    def _show_camera_setup(self):
+        """Show 3D camera placement viewer."""
+        try:
+            from src.camera_setup_viewer import CameraSetupViewer
+            cal = None
+            if self.coordinator and self.coordinator.triangulator:
+                cal = self.coordinator.triangulator.calibration
+            if not cal:
+                messagebox.showinfo("Camera Setup",
+                                    "No calibration loaded.\nLoad or run calibration first.")
+                return
+            viewer = CameraSetupViewer(cal)
+            viewer.show()
+            
+            # Also print camera info
+            info = viewer.get_camera_info()
+            for cam_id, ci in info.items():
+                pos = ci['position']
+                euler = ci['euler_deg']
+                print(f"[CameraSetup] {cam_id}: pos=({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f})  "
+                      f"FOV={ci['fov_h_deg']:.0f}°×{ci['fov_v_deg']:.0f}°  "
+                      f"yaw={euler['yaw']:.1f}° pitch={euler['pitch']:.1f}°")
+                if 'baseline_to' in ci:
+                    for other, bl in ci['baseline_to'].items():
+                        print(f"  baseline to {other}: {bl:.3f}m")
+        except Exception as e:
+            messagebox.showerror("Camera Setup", f"Error: {e}")
 
     def show_visualization(self):
         """Callback to launch Session Dashboard (HTML)."""
@@ -581,17 +1074,28 @@ class MocapGUI:
 
     def video_loop(self):
         while self.running:
+            t_frame_start = time.perf_counter()
+            
+            # ── Capture ──
+            t_cap_start = time.perf_counter()
             frame = self.camera.read()
             if frame is None:
                 continue
+            t_cap_end = time.perf_counter()
             
             # 1. Mirroring (Horizontal Flip)
             if self.mirror_active:
                 frame = cv2.flip(frame, 1)
             
-            # Process & Save
-            # Note: If mirrored, landmarks will be mirrored too logic-wise
+            # ── Detection ──
+            t_det_start = time.perf_counter()
             results = self.detector.process(frame)
+            t_det_end = time.perf_counter()
+            
+            # Track latency in coordinator if available
+            if self.coordinator:
+                self.coordinator.record_latency('capture', (t_cap_end - t_cap_start) * 1000)
+                self.coordinator.record_latency('detection', (t_det_end - t_det_start) * 1000)
             
             # --- PHYSICS CORRECTION ---
             # Corrects bone lengths and smooths jitter
@@ -712,7 +1216,7 @@ class MocapGUI:
                 
                 # Update GUI safely (Throttled)
                 if self.frame_count % 5 == 0:
-                     self.root.after(0, self.update_table_safe, results)
+                     self._enqueue_ui_task(self.update_table_safe, results)
                      
             self.frame_count += 1
 
@@ -769,9 +1273,12 @@ class MocapGUI:
                 combined = np.hstack([local_display, remote_display])
                 self._schedule_display_tkinter(combined, "Dual Camera — Master")
                 
-                # --- DISPLAY SYNC STATUS & 3D CALC ---
+                # --- DISPLAY SYNC STATUS & 3D CALC (with latency tracking) ---
                 # Check sync status and RUN 3D TRIANGULATION
+                t_sync_start = time.perf_counter()
                 synced_batch = self.coordinator.get_synchronized_batch()
+                t_sync_end = time.perf_counter()
+                self.coordinator.record_latency('sync', (t_sync_end - t_sync_start) * 1000)
                 
                 # DEBUG SYNC FAILURE (Conditional print)
                 if not synced_batch and self.frame_count % 30 == 0:
@@ -787,21 +1294,40 @@ class MocapGUI:
                 if synced_batch and len(synced_batch) >= 2:
                     sync_label = "SYNCED ✓"
                     
-                    # Compute 3D Pose
+                    # Compute 3D Pose (with latency tracking)
+                    t_tri_start = time.perf_counter()
                     pose_3d = self.coordinator.get_synced_3d_pose(synced_batch)
+                    t_tri_end = time.perf_counter()
+                    self.coordinator.record_latency('triangulation', (t_tri_end - t_tri_start) * 1000)
+                    
+                    # Total pipeline latency (capture to now)
+                    t_total = (time.perf_counter() - t_frame_start) * 1000 if 't_frame_start' in dir() else 0
+                    self.coordinator.record_latency('total', t_total)
                     
                     # SAVE SYNCHRONIZED DATA (Master Mode Recording)
                     if self.is_recording:
                          pc1_res = next((f.results for f in synced_batch if f.camera_id == 'local_cam'), None)
                          pc2_res = next((f.results for f in synced_batch if f.camera_id == 'cam_0'), None)
                          self.db.save_synced_frame(time.time(), pc1_res, pc2_res, pose_3d)
+                         
+                         # Raw frame archival (if enabled)
+                         if config.SAVE_RAW_FRAMES:
+                             self.db.save_raw_frame(frame, self.frame_count, 'local_cam')
 
                     if pose_3d:
+                        self.latest_quality = self._extract_quality_metrics(pose_3d)
                         if self.frame_count % 100 == 0:
                             print(f"✅ 3D Pose Computed! {len(pose_3d.get('pose_3d',[]))} landmarks")
+                            # Periodic latency log
+                            self.coordinator._log_latency_summary()
                         if self.live_viz and self.live_viz.initialized:
                              try: self.live_viz.update(pose_3d)
                              except: pass
+                
+                # Update latency panel every ~1 second
+                if self.frame_count % 30 == 0:
+                    self._enqueue_ui_task(self._update_latency_panel)
+                    self._enqueue_ui_task(self._update_quality_panel)
 
                 # FINAL GPU DISPLAY (or CPU Fallback defined earlier)
                 # Note: Labels are already applied in the GPU/CPU blocks above

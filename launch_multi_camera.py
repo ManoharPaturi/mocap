@@ -4,7 +4,19 @@ Easily switch between single, server, and master modes
 """
 
 import sys
+import os
 import argparse
+
+# Suppress TFLite/MediaPipe/abseil noise before any imports
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'          # TensorFlow: errors only
+os.environ['GLOG_minloglevel'] = '2'               # Google logging: warnings+ only
+os.environ['ABSL_MIN_LOG_LEVEL'] = '2'             # abseil: warnings+ only
+os.environ['MEDIAPIPE_DISABLE_GPU_LOG'] = '1'      # MediaPipe GPU logs
+
+import logging
+logging.getLogger('mediapipe').setLevel(logging.ERROR)
+logging.getLogger('tensorflow').setLevel(logging.ERROR)
+logging.getLogger('absl').setLevel(logging.ERROR)
 
 # Parse arguments
 parser = argparse.ArgumentParser(description='Launch VS5 Multi-Camera System')
@@ -66,4 +78,10 @@ except Exception as e:
     print(f"\n[CRITICAL ERROR] Launcher failed: {e}")
     import traceback
     traceback.print_exc()
-    input("Press Enter to exit...")
+    # Do not block automation/remote terminals on stdin.
+    try:
+        if sys.stdin and sys.stdin.isatty():
+            input("Press Enter to exit...")
+    except Exception:
+        pass
+    sys.exit(1)

@@ -14,7 +14,9 @@ from threading import Thread, Event
 from config import (
     CAMERA_ID, DISCOVERY_PORT, DATA_PORT, COMPRESS_NETWORK_DATA,
     NETWORK_PROTOCOL, FEEDBACK_PORT, FEEDBACK_ENABLED, MASTER_IP,
-    NETWORK_JPEG_QUALITY, NETWORK_STREAM_WIDTH, NETWORK_STREAM_HEIGHT
+    NETWORK_JPEG_QUALITY, NETWORK_STREAM_WIDTH, NETWORK_STREAM_HEIGHT,
+    ENABLE_CLOCK_SYNC, CLOCK_SYNC_PORT,
+    MESSAGE_SCHEMA_VERSION, CALIBRATION_ID, FPS
 )
 
 
@@ -54,6 +56,12 @@ class CameraServer:
         self.feedback_socket = None
         self.feedback_thread = None
         self.quality_hints = {}
+        self.compute_hints = {}
+        self.last_gpu_compute = {}
+        
+        # Clock Synchronization
+        self.clock_sync_socket = None
+        self.clock_sync_thread = None
         
         print(f"[CameraServer] Initialized with ID: {camera_id} on IP: {self.local_ip}")
     
@@ -92,6 +100,11 @@ class CameraServer:
             self.feedback_thread = Thread(target=self._feedback_loop, daemon=True)
             self.feedback_thread.start()
         
+        # Start clock sync responder if enabled
+        if ENABLE_CLOCK_SYNC:
+            self.clock_sync_thread = Thread(target=self._clock_sync_handler, daemon=True)
+            self.clock_sync_thread.start()
+        
         print(f"[CameraServer] Started broadcasting on port {DISCOVERY_PORT}")
     
     def stop(self):
@@ -108,6 +121,8 @@ class CameraServer:
             self.discovery_thread.join(timeout=2.0)
         if self.feedback_thread:
             self.feedback_thread.join(timeout=2.0)
+        if self.clock_sync_thread:
+            self.clock_sync_thread.join(timeout=2.0)
         
         # Close sockets
         if self.discovery_socket:
@@ -116,6 +131,8 @@ class CameraServer:
             self.data_socket.close()
         if self.feedback_socket:
             self.feedback_socket.close()
+        if self.clock_sync_socket:
+            self.clock_sync_socket.close()
         
         self.context.term()
         print("[CameraServer] Stopped")
@@ -137,6 +154,65 @@ class CameraServer:
         self.data_socket.setsockopt(zmq.SNDHWM, 1)
         self.data_socket.setsockopt(zmq.CONFLATE, 1)
         self.data_socket.bind(f"tcp://*:{DATA_PORT}")
+    
+    def _clock_sync_handler(self):
+        """
+        Clock sync responder (Cristian's Algorithm).
+        Listens for PING requests from master and replies with local timestamp.
+        Runs on a dedicated REP socket on CLOCK_SYNC_PORT.
+        """
+        try:
+            self.clock_sync_socket = self.context.socket(zmq.REP)
+            self.clock_sync_socket.setsockopt(zmq.LINGER, 0)
+            self.clock_sync_socket.setsockopt(zmq.RCVTIMEO, 1000)  # 1s timeout
+            self.clock_sync_socket.bind(f"tcp://*:{CLOCK_SYNC_PORT}")
+            print(f"[CameraServer] Clock sync responder active on port {CLOCK_SYNC_PORT}")
+        except Exception as e:
+            print(f"[CameraServer] Could not bind clock sync port {CLOCK_SYNC_PORT}: {e}")
+            return
+        
+        while self.running and not self.stop_event.is_set():
+            try:
+                # Wait for PING from master
+                data = self.clock_sync_socket.recv()
+                
+                # Once recv() succeeds, we MUST send a reply before the
+                # next recv(), otherwise the REP socket enters an invalid
+                # state ("Operation cannot be accomplished in current state").
+                try:
+                    msg = msgpack.unpackb(data, raw=False)
+                    
+                    if msg.get('type') == 'clock_ping':
+                        # Reply immediately with server's current time
+                        reply = {
+                            'type': 'clock_pong',
+                            'camera_id': self.camera_id,
+                            'server_time_ns': time.time_ns(),
+                            'master_send_time_ns': msg.get('master_time_ns', 0)
+                        }
+                        self.clock_sync_socket.send(msgpack.packb(reply))
+                    else:
+                        # Unknown request, send empty reply to unblock REQ/REP
+                        self.clock_sync_socket.send(msgpack.packb({'type': 'unknown'}))
+                except Exception as inner_e:
+                    # Parsing or processing failed — still must send a reply
+                    # to keep the REP socket in valid state
+                    try:
+                        self.clock_sync_socket.send(msgpack.packb({
+                            'type': 'error',
+                            'error': str(inner_e)
+                        }))
+                    except Exception:
+                        pass  # Socket truly broken, will be caught next iteration
+                    if self.running:
+                        print(f"[CameraServer] Clock sync processing error: {inner_e}")
+                    
+            except zmq.Again:
+                # Timeout, no ping received — loop and check stop_event
+                continue
+            except Exception as e:
+                if self.running:
+                    print(f"[CameraServer] Clock sync error: {e}")
     
     def _discovery_loop(self):
         """Continuously broadcast discovery packets."""
@@ -191,12 +267,37 @@ class CameraServer:
                     frame_jpeg = jpeg_buffer.tobytes()
             
             # Package frame data
+            gpu_compute = {}
+            if isinstance(results, dict):
+                inf = results.get('inference_ms')
+                if isinstance(inf, dict):
+                    pose_ms = float(inf.get('pose', 0.0))
+                    face_ms = float(inf.get('face', 0.0))
+                    hand_ms = float(inf.get('hand', 0.0))
+                    total_ms = pose_ms + face_ms + hand_ms
+                    gpu_compute = {
+                        'inference_times_ms': {
+                            'pose': pose_ms,
+                            'face': face_ms,
+                            'hand': hand_ms,
+                            'total': total_ms,
+                        },
+                        'device': 'gpu' if total_ms > 0 else 'cpu',
+                        'timestamp_ns': time.time_ns()
+                    }
+                    self.last_gpu_compute = gpu_compute
+
             frame_data = {
                 'type': 'frame_data',
+                'schema_version': MESSAGE_SCHEMA_VERSION,
                 'camera_id': self.camera_id,
                 'frame_number': frame_number,
                 'timestamp': timestamp,
+                'calibration_id': CALIBRATION_ID,
+                'capture_fps': FPS,
+                'landmarks': self._build_stereo_packet_landmarks(results),
                 'results': self._serialize_results(results),
+                'gpu_compute': gpu_compute if gpu_compute else None,
                 'frame_jpeg': frame_jpeg  # JPEG-encoded frame bytes
             }
             
@@ -250,6 +351,45 @@ class CameraServer:
             serialized['hand_landmarks'] = results['hand_landmarks']
         
         return serialized
+
+    def _build_stereo_packet_landmarks(self, results: Dict[str, Any]) -> list:
+        """
+        Build compact 2D packet landmarks: [{'x','y','conf'}, ...] for 33 pose joints.
+        Falls back gracefully when pose is unavailable.
+        """
+        if not isinstance(results, dict):
+            return []
+
+        pose_obj = results.get('pose')
+        if pose_obj and hasattr(pose_obj, 'pose_landmarks'):
+            if not pose_obj.pose_landmarks or len(pose_obj.pose_landmarks) == 0:
+                return []
+
+            person = pose_obj.pose_landmarks[0]
+            return [
+                {
+                    'x': float(lm.x),
+                    'y': float(lm.y),
+                    'conf': float(getattr(lm, 'visibility', 1.0))
+                }
+                for lm in person
+            ]
+
+        pose_landmarks = results.get('pose_landmarks')
+        if isinstance(pose_landmarks, list) and len(pose_landmarks) > 0:
+            first_person = pose_landmarks[0]
+            if isinstance(first_person, list):
+                landmarks = []
+                for lm in first_person:
+                    if isinstance(lm, dict):
+                        landmarks.append({
+                            'x': float(lm.get('x', 0.0)),
+                            'y': float(lm.get('y', 0.0)),
+                            'conf': float(lm.get('visibility', lm.get('v', 1.0)))
+                        })
+                return landmarks
+
+        return []
     
     def _serialize_landmark_list(self, landmark_list) -> list:
         """Convert MediaPipe landmark list to simple dict format."""
@@ -299,11 +439,17 @@ class CameraServer:
                 if msg.get('type') == 'quality_feedback':
                     hints = msg.get('hints', {})
                     self.quality_hints = hints
+                    self.compute_hints = msg.get('compute_hints', {}) or {}
 
                     # Log summary if errors are unusually high
                     high_err_count = sum(1 for err in hints.values() if err > 25.0)
                     if high_err_count > 0 and self.frame_count % 300 == 0:
                         print(f"[CameraServer] Master Feedback: {high_err_count} noisy joints detected")
+
+                    if self.compute_hints and self.frame_count % 300 == 0:
+                        action = self.compute_hints.get('suggested_action', 'none')
+                        target = self.compute_hints.get('target_stage', 'unknown')
+                        print(f"[CameraServer] Compute hints: action={action}, target={target}")
 
             except zmq.Again:
                 continue
@@ -318,7 +464,10 @@ class CameraServer:
             'camera_id': self.camera_id,
             'ip': self.local_ip,
             'running': self.running,
-            'frames_sent': self.frame_count
+            'frames_sent': self.frame_count,
+            'quality_hints_count': len(self.quality_hints),
+            'compute_hints': self.compute_hints,
+            'last_gpu_compute': self.last_gpu_compute
         }
 
 

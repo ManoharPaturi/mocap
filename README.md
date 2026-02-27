@@ -1,3 +1,91 @@
+# Stereo Coordinate & Kinematics Convention (VS2)
+
+This project now uses a locked, right-handed world coordinate convention.
+
+## 1) Global World Frame W
+
+- +X: Right
+- +Y: Up
+- +Z: Forward (away from front camera)
+
+## 2) Camera Frame (OpenCV)
+
+- +X: Right in image
+- +Y: Down in image
+- +Z: Forward from lens
+
+`front camera` is treated as world origin through calibration/triangulation.
+An explicit axis transform maps camera-style coordinates to world convention (Y-up).
+
+## 3) Body Segment Convention
+
+- Upper Arm (R): `Elbow - Shoulder`
+- Forearm (R): `Wrist - Elbow`
+- Trunk axis: `MidShoulder - MidHip`
+- Pelvic axis: `RightHip - LeftHip`
+
+## 4) Angle Convention
+
+- Unit: degrees
+- Range: 0° to 180°
+- Example (Right Elbow):
+  - `v1 = Shoulder - Elbow`
+  - `v2 = Wrist - Elbow`
+  - `theta = arccos((v1·v2) / (|v1||v2|))`
+
+Interpretation:
+- 180°: full extension
+- lower values: increasing flexion
+
+## 5) End-to-End Workflow
+
+1. **Capture (all cameras)**
+    - Capture RGB frame
+    - Run MediaPipe pose
+    - Serialize compact packet:
+      - `camera_id`
+      - `timestamp` (epoch nanoseconds)
+      - `landmarks[33] = (x, y, conf)`
+2. **Frame synchronization (master)**
+    - Match timestamps within `SYNC_TIME_THRESHOLD_MS` (default ±20 ms)
+    - Drop unmatched frames (strict sync)
+3. **Undistortion**
+    - Convert normalized points to pixel coordinates per camera image size
+    - Undistort with camera intrinsics/distortion parameters
+4. **Triangulation**
+    - Use calibrated projection matrices `P1`, `P2` (camera A is world origin)
+    - Solve in homogeneous coordinates, convert to Euclidean `(X, Y, Z)`
+5. **Confidence filtering**
+    - Per-camera input confidence gate: `STEREO_POINT_MIN_INPUT_CONFIDENCE`
+    - Low-confidence 3D points flagged in `low_reliability_landmarks`
+6. **3D filtering**
+    - Apply 1-Euro filter to 3D positions only (`ENABLE_3D_ONE_EURO_FILTER`)
+    - Angles are computed from filtered positions (angles themselves are not filtered)
+7. **Kinematics engine**
+    - Linear velocity per joint: `(P_t - P_t-1) / dt`
+    - Linear acceleration per joint: `(V_t - V_t-1) / dt`
+    - Joint angles in degrees: `[0, 180]`
+    - Angular velocity: `(theta_t - theta_t-1) / dt`
+8. **Dashboard rendering**
+    - Live 3D skeleton in world-frame convention (+X right, +Y up, +Z forward)
+    - Angle/velocity streams and confidence metadata available in fused payload
+9. **Data logging**
+    - Per synchronized frame stores:
+      - `pose_3d`
+      - `kinematics_3d`
+      - `joint_confidence`
+      - `low_reliability_landmarks`
+10. **Validation**
+    - Static jitter test (20s)
+    - Known-angle test (e.g. 90° elbow)
+    - Known-distance test (e.g. 1m Z-depth)
+
+## 6) Validation Protocol
+
+- Static jitter test (20s standing): report per-joint variance in XYZ
+- Known-angle test (e.g., 90° elbow): compare measured `Angle_Elbow_R/L`
+- Known-distance test (e.g., 1m depth check): compare triangulated `Z` against physical distance
+
 # VS5 Motion Capture - Multi-Camera Enhanced Edition
 
 Real-time multi-person pose, face, and hand tracking with **dual-laptop stereo 3D reconstruction**.

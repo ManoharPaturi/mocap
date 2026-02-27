@@ -7,6 +7,21 @@ from config import (
 )
 
 class Calculations:
+    POSE_IDX = {
+        'left_shoulder': 11,
+        'right_shoulder': 12,
+        'left_elbow': 13,
+        'right_elbow': 14,
+        'left_wrist': 15,
+        'right_wrist': 16,
+        'left_hip': 23,
+        'right_hip': 24,
+        'left_knee': 25,
+        'right_knee': 26,
+        'left_ankle': 27,
+        'right_ankle': 28,
+    }
+
     @staticmethod
     def calculate_angle(a, b, c, vector_b_to_a=None):
         """
@@ -44,6 +59,106 @@ class Calculations:
         pa = np.array([a['x'], a['y'], a['z']])
         pb = np.array([b['x'], b['y'], b['z']])
         return round(float(np.linalg.norm(pa - pb)), 4)
+
+    @staticmethod
+    def get_segment_vectors_from_pose_3d(pose_3d):
+        """
+        Return canonical body segment vectors from a 3D pose dict/list.
+        Conventions:
+            Upper Arm (R): Elbow - Shoulder
+            Forearm (R): Wrist - Elbow
+            Trunk Axis: MidShoulder - MidHip
+            Pelvic Axis: RightHip - LeftHip
+        """
+        def p(index):
+            if isinstance(pose_3d, dict):
+                return pose_3d.get(index)
+            if isinstance(pose_3d, list) and index < len(pose_3d):
+                return pose_3d[index]
+            return None
+
+        ls = p(Calculations.POSE_IDX['left_shoulder'])
+        rs = p(Calculations.POSE_IDX['right_shoulder'])
+        re = p(Calculations.POSE_IDX['right_elbow'])
+        rw = p(Calculations.POSE_IDX['right_wrist'])
+        lh = p(Calculations.POSE_IDX['left_hip'])
+        rh = p(Calculations.POSE_IDX['right_hip'])
+
+        segments = {}
+        if rs and re:
+            segments['upper_arm_r'] = {
+                'x': re['x'] - rs['x'],
+                'y': re['y'] - rs['y'],
+                'z': re['z'] - rs['z']
+            }
+        if re and rw:
+            segments['forearm_r'] = {
+                'x': rw['x'] - re['x'],
+                'y': rw['y'] - re['y'],
+                'z': rw['z'] - re['z']
+            }
+        if ls and rs and lh and rh:
+            mid_shoulder = {
+                'x': (ls['x'] + rs['x']) / 2.0,
+                'y': (ls['y'] + rs['y']) / 2.0,
+                'z': (ls['z'] + rs['z']) / 2.0,
+            }
+            mid_hip = {
+                'x': (lh['x'] + rh['x']) / 2.0,
+                'y': (lh['y'] + rh['y']) / 2.0,
+                'z': (lh['z'] + rh['z']) / 2.0,
+            }
+            segments['trunk_axis'] = {
+                'x': mid_shoulder['x'] - mid_hip['x'],
+                'y': mid_shoulder['y'] - mid_hip['y'],
+                'z': mid_shoulder['z'] - mid_hip['z']
+            }
+        if lh and rh:
+            segments['pelvic_axis'] = {
+                'x': rh['x'] - lh['x'],
+                'y': rh['y'] - lh['y'],
+                'z': rh['z'] - lh['z']
+            }
+
+        return segments
+
+    @staticmethod
+    def get_joint_angles_from_pose_3d(pose_3d):
+        """Compute canonical 3D joint angles in degrees, clamped to [0, 180]."""
+        def p(index):
+            if isinstance(pose_3d, dict):
+                return pose_3d.get(index)
+            if isinstance(pose_3d, list) and index < len(pose_3d):
+                return pose_3d[index]
+            return None
+
+        def angle(a_idx, b_idx, c_idx):
+            a = p(a_idx)
+            b = p(b_idx)
+            c = p(c_idx)
+            if not all([a, b, c]):
+                return None
+            value = Calculations.calculate_angle(a, b, c)
+            return float(np.clip(value, 0.0, 180.0))
+
+        angles = {}
+        pairs = {
+            'Angle_Elbow_L': ('left_shoulder', 'left_elbow', 'left_wrist'),
+            'Angle_Elbow_R': ('right_shoulder', 'right_elbow', 'right_wrist'),
+            'Angle_Knee_L': ('left_hip', 'left_knee', 'left_ankle'),
+            'Angle_Knee_R': ('right_hip', 'right_knee', 'right_ankle'),
+        }
+
+        for key, (a_name, b_name, c_name) in pairs.items():
+            value = angle(
+                Calculations.POSE_IDX[a_name],
+                Calculations.POSE_IDX[b_name],
+                Calculations.POSE_IDX[c_name]
+            )
+            if value is not None:
+                angles[key] = value
+
+        return angles
 
     @staticmethod
     def get_body_metrics(pose_landmarks):

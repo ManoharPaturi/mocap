@@ -41,7 +41,6 @@ class Camera:
                     self.running = False
             else:
                 self.running = False
-            time.sleep(0.005) # Slight delay to yield CPU
 
     def read(self):
         """Return the most recent frame."""

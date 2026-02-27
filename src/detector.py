@@ -161,6 +161,20 @@ class MocapDetector:
             
         pose_model_path = MODEL_PATHS[model_type]
         self.pose_landmarker = self._build_pose_landmarker(pose_model_path)
+
+    def get_gpu_profile(self) -> dict:
+        """Get GPU inference timing statistics."""
+        if not hasattr(self, '_gpu_profile_accum') or not self._gpu_profile_accum.get('pose'):
+            return {}
+        acc = self._gpu_profile_accum
+        n = min(len(acc['pose']), 100)
+        return {
+            'pose_ms': sum(acc['pose'][-n:]) / n,
+            'face_ms': sum(acc['face'][-n:]) / n if acc['face'] else 0,
+            'hand_ms': sum(acc['hand'][-n:]) / n if acc['hand'] else 0,
+            'delegate': 'Metal' if self.use_gpu_delegate else 'CPU',
+            'total_frames': acc['count']
+        }
         
     def set_imaging_params(self, gamma=1.0, face_exposure=False, enable_face=True, enable_hand=True, enable_roi=None):
         """Update runtime imaging parameters."""
@@ -310,8 +324,12 @@ class MocapDetector:
             timestamp_ms = self.last_timestamp_ms + 1
         self.last_timestamp_ms = timestamp_ms
         
-        # Run Detectors
+        # Run Detectors (with GPU profiling)
+        from config import ENABLE_GPU_PROFILING
+        
+        t_pose_start = time.perf_counter()
         pose_result = self.pose_landmarker.detect_for_video(mp_image, timestamp_ms)
+        t_pose_end = time.perf_counter()
         
         # --- REPROJECT LANDMARKS TO ORIGINAL FRAME ---
         if pose_result and pose_result.pose_landmarks:
@@ -367,8 +385,11 @@ class MocapDetector:
 
         
         face_result = None
+        t_face_ms = 0
         if self.enable_face:
+            t_face_start = time.perf_counter()
             face_result = self.face_landmarker.detect_for_video(mp_image, timestamp_ms)
+            t_face_ms = (time.perf_counter() - t_face_start) * 1000
             # Update Face Rect for Exposure (from first face)
             if face_result and face_result.face_landmarks:
                  # Calculate bounding box
@@ -381,14 +402,43 @@ class MocapDetector:
                  self.last_face_rect = (int(x_min), int(y_min), int(x_max-x_min), int(y_max-y_min))
         
         hand_result = None
+        t_hand_ms = 0
         if self.enable_hand:
+            t_hand_start = time.perf_counter()
             hand_result = self.hand_landmarker.detect_for_video(mp_image, timestamp_ms)
+            t_hand_ms = (time.perf_counter() - t_hand_start) * 1000
+        
+        # GPU profiling accumulator
+        t_pose_ms = (t_pose_end - t_pose_start) * 1000
+        if ENABLE_GPU_PROFILING:
+            if not hasattr(self, '_gpu_profile_accum'):
+                self._gpu_profile_accum = {'pose': [], 'face': [], 'hand': [], 'count': 0}
+            self._gpu_profile_accum['pose'].append(t_pose_ms)
+            self._gpu_profile_accum['face'].append(t_face_ms)
+            self._gpu_profile_accum['hand'].append(t_hand_ms)
+            self._gpu_profile_accum['count'] += 1
+            
+            # Log every 300 frames
+            if self._gpu_profile_accum['count'] % 300 == 0:
+                n = len(self._gpu_profile_accum['pose'])
+                avg_p = sum(self._gpu_profile_accum['pose'][-100:]) / min(n, 100)
+                avg_f = sum(self._gpu_profile_accum['face'][-100:]) / min(n, 100) if self._gpu_profile_accum['face'] else 0
+                avg_h = sum(self._gpu_profile_accum['hand'][-100:]) / min(n, 100) if self._gpu_profile_accum['hand'] else 0
+                total = avg_p + avg_f + avg_h
+                print(f"[GPU Profile] Pose: {avg_p:.1f}ms  Face: {avg_f:.1f}ms  "
+                      f"Hand: {avg_h:.1f}ms  Total: {total:.1f}ms  "
+                      f"(GPU: {'Metal' if self.use_gpu_delegate else 'CPU'})")
         
         return {
             'pose': pose_result,
             'face': face_result,
             'hand': hand_result,
-            'roi': self.last_roi if self.enable_roi_cropping else None
+            'roi': self.last_roi if self.enable_roi_cropping else None,
+            'inference_ms': {
+                'pose': t_pose_ms,
+                'face': t_face_ms,
+                'hand': t_hand_ms
+            }
         }
 
 

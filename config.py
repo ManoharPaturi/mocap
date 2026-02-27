@@ -28,7 +28,7 @@ except Exception:
     DEVICE = "cpu"
 
 # Options: 'LITE' (Fastest), 'FULL' (Balanced), 'HEAVY' (Most Accurate)
-POSE_MODEL_COMPLEXITY = 'FULL' 
+POSE_MODEL_COMPLEXITY = 'LITE' 
 
 # Multi-Person Settings (set to 1 for single-person use — each additional
 # slot multiplies MediaPipe's internal memory allocation for all 3 models)
@@ -175,6 +175,43 @@ ENABLE_MULTI_CAMERA = False
 CAMERA_ROLE = 'single'  # 'single', 'server', or 'master'
 NUM_CAMERAS = 2         # Total number of cameras in setup
 
+# ============================================
+# COORDINATE SYSTEM CONVENTIONS (LOCKED)
+# ============================================
+# World Frame W (Right-handed):
+#   +X: Right
+#   +Y: Up
+#   +Z: Forward (away from front camera)
+WORLD_FRAME = {
+    'handedness': 'right',
+    'x_axis': 'right',
+    'y_axis': 'up',
+    'z_axis': 'forward'
+}
+
+# OpenCV Camera Frame C:
+#   +X: right in image
+#   +Y: down in image
+#   +Z: forward from lens
+CAMERA_FRAME = {
+    'x_axis': 'right',
+    'y_axis': 'down',
+    'z_axis': 'forward'
+}
+
+# Transform camera-centric 3D into world frame convention.
+# Current calibration/triangulation outputs OpenCV-style camera frame,
+# so Y is flipped to enforce +Y up in world frame.
+WORLD_AXIS_TRANSFORM = {
+    'flip_x': False,
+    'flip_y': True,
+    'flip_z': False
+}
+
+# Angle conventions for dashboard + analytics.
+ANGLE_UNIT = 'degrees'
+ANGLE_RANGE = (0.0, 180.0)
+
 # --- GUI Integration Mode (NEW) ---
 # Set this based on which laptop you're using:
 # 'single' - Normal single-camera mode (default)
@@ -188,13 +225,15 @@ MASTER_IP = '10.137.227.228'  # IP address of master coordinator
 DISCOVERY_PORT = 6000        # Port for camera discovery broadcasts
 DATA_PORT = 6001             # Port for frame data transmission
 NETWORK_PROTOCOL = 'tcp'     # 'udp' (faster) or 'tcp' (reliable)
-NETWORK_JPEG_QUALITY = 35    # Lower = smaller/faster network frames
+NETWORK_JPEG_QUALITY = 40    # Lower for reduced bandwidth and lower network latency
 NETWORK_STREAM_WIDTH = 640   # Remote stream width for transmission only
 NETWORK_STREAM_HEIGHT = 360  # Remote stream height for transmission only
+NETWORK_FRAMERATE_LIMIT = 30 # Cap transmission to this FPS
 
 # Frame Synchronization
-SYNC_TIME_THRESHOLD_MS = 50.0  # Tightened for better accuracy with CUDA
-FRAME_BUFFER_SIZE = 1          # Latest-frame mode: keep only newest frame per camera
+SYNC_TIME_THRESHOLD_MS = 100.0 # 100ms tolerance for WiFi jitter (was 20ms)
+FRAME_BUFFER_SIZE = 1          # Latest-frame mode for lowest latency
+STALE_FRAME_TIMEOUT_MS = 2000  # Drop frames older than 2s vs newest across all cameras
 
 # Calibration
 CALIBRATION_FILE = 'calibration.json'
@@ -210,9 +249,34 @@ CONFIDENCE_WEIGHT_VISIBILITY = 0.6   # Weight for visibility in confidence calcu
 CONFIDENCE_WEIGHT_REPROJ = 0.4       # Weight for reprojection error in confidence
 OCCLUSION_FILL_ENABLED = True        # Use monocular fallback for occluded landmarks
 MONOCULAR_SUBJECT_DISTANCE_M = 2.5  # Approx distance for monocular fallback
+STEREO_POINT_MIN_INPUT_CONFIDENCE = 0.5  # Min per-camera landmark confidence used for triangulation
+KINEMATICS_MIN_POINT_CONFIDENCE = 0.5    # Min 3D point confidence used in kinematics engine
+ENABLE_3D_ONE_EURO_FILTER = True         # Filter 3D joint positions before kinematics
 
 # Level 3 Feedback Loop
 FEEDBACK_PORT = 6002             # Port for quality feedback (Master -> Server)
 FEEDBACK_ENABLED = True         # Enable quality feedback loop
 FEEDBACK_INTERVAL_FRAMES = 10    # Send feedback every N frames
+
+# Clock Synchronization
+ENABLE_CLOCK_SYNC = True             # Enable automatic clock offset estimation
+CLOCK_SYNC_PORT = 6003               # Port for clock sync ping/pong
+CLOCK_SYNC_SAMPLES = 10              # Number of ping samples to collect per sync
+CLOCK_SYNC_INTERVAL_SEC = 300        # Re-sync every 5 minutes (0 = sync once at startup)
+CLOCK_SYNC_RTT_OUTLIER_FACTOR = 2.0  # Reject samples with RTT > factor * min_rtt
+
+# Message Format
+MESSAGE_SCHEMA_VERSION = 2           # Payload schema version for forward compatibility
+CALIBRATION_ID = None                # Set after calibration (e.g., 'cal_20260227_1430')
+
+# Latency Instrumentation
+ENABLE_LATENCY_TRACKING = True       # Track per-stage pipeline latency
+LATENCY_LOG_INTERVAL = 100           # Print latency summary every N frames
+
+# Dataset Pipeline
+SAVE_RAW_FRAMES = False              # Save raw JPEG frames to disk during recording
+SESSION_EXPORT_FORMAT = 'csv'        # 'csv' or 'json'
+
+# GPU Profiling
+ENABLE_GPU_PROFILING = False         # Track GPU inference timing
 
