@@ -28,7 +28,7 @@ except Exception:
     DEVICE = "cpu"
 
 # Options: 'LITE' (Fastest), 'FULL' (Balanced), 'HEAVY' (Most Accurate)
-POSE_MODEL_COMPLEXITY = 'LITE' 
+POSE_MODEL_COMPLEXITY = 'FULL' 
 
 # Multi-Person Settings (set to 1 for single-person use — each additional
 # slot multiplies MediaPipe's internal memory allocation for all 3 models)
@@ -225,8 +225,8 @@ MASTER_IP = '10.137.227.228'  # IP address of master coordinator
 DISCOVERY_PORT = 6000        # Port for camera discovery broadcasts
 DATA_PORT = 6001             # Port for frame data transmission
 NETWORK_PROTOCOL = 'tcp'     # 'udp' (faster) or 'tcp' (reliable)
-NETWORK_JPEG_QUALITY = 40    # Lower for reduced bandwidth and lower network latency
-NETWORK_STREAM_WIDTH = 640   # Remote stream width for transmission only
+NETWORK_JPEG_QUALITY = 30   # Lower for reduced bandwidth and lower network latency
+NETWORK_STREAM_WIDTH = 640  # Remote stream width for transmission only
 NETWORK_STREAM_HEIGHT = 360  # Remote stream height for transmission only
 NETWORK_FRAMERATE_LIMIT = 30 # Cap transmission to this FPS
 
