@@ -1,3 +1,50 @@
+# Real-Time Markerless Motion Capture (VS1 → VS5)
+
+Real-time, multi-person **markerless motion capture** with **dual-PC stereo 3D
+reconstruction**: a "server" PC captures video and runs MediaPipe Pose (33 body landmarks,
+up to 5 people, plus face & hands), streaming landmarks over ZeroMQ; a "master" PC
+timestamp-synchronizes frames (±20 ms matching), undistorts them, **DLT-triangulates** 3D
+joints with calibrated projection matrices, applies 1-Euro filtering and pose correction, and
+drives a live 3D skeleton dashboard — while logging sessions to SQLite/PostgreSQL with CSV
+export and Plotly reports. A kinematics engine computes joint angles (0–180°) and linear/
+angular velocity & acceleration in real time.
+
+```text
+server PC: camera ─▶ MediaPipe pose/face/hands ─ZMQ─▶ master PC: sync (±20 ms) ─▶ undistort
+                                                      ─▶ DLT triangulate ─▶ 1-Euro filter
+                                                      ─▶ kinematics ─▶ live 3D dashboard
+                                                      ─▶ SQLite/Postgres + CSV + Plotly
+```
+
+## Quick start
+
+```bash
+python main_gui.py                     # desktop GUI (master or server mode)
+# two-PC setup: scripts/run_master.bat on the master, server mode on the other PC
+# ports 5000 (discovery) / 5001 (stream) — see SETUP.md
+cd frontend && npm install && npm run dev   # web dashboard (React 19 + Vite 7 + Tailwind 4)
+```
+
+## Stack
+
+Python 3.8–3.10 · OpenCV · MediaPipe 0.10.9 · PyTorch (CUDA/Apple MPS) · ZeroMQ + msgpack ·
+FastAPI · pandas / Plotly · Tkinter desktop GUI · React + Vite frontend
+
+## Docs in this repo
+
+| Doc | Contents |
+|---|---|
+| [SETUP.md](SETUP.md) | Install + two-PC configuration |
+| [SYSTEM_ARCHITECTURE.md](SYSTEM_ARCHITECTURE.md) | Module & data-flow architecture |
+| [COORDINATE_SYSTEM_SPEC.md](COORDINATE_SYSTEM_SPEC.md) | Locked right-handed world convention |
+| [DOCUMENTATION.md](DOCUMENTATION.md) | Full developer documentation |
+| [IMPLEMENTATION_PROGRESS.md](IMPLEMENTATION_PROGRESS.md) / [UPDATE_NOTES.md](UPDATE_NOTES.md) | Version history (VS1 → VS5) |
+
+> The macOS continuation of this project (VS6 → VS7.1, evaluation pipeline, async DB writes)
+> lives in [mocap_mac](https://github.com/ManoharPaturi/mocap_mac).
+
+---
+
 # Stereo Coordinate & Kinematics Convention (VS2)
 
 This project now uses a locked, right-handed world coordinate convention.
